@@ -144,6 +144,16 @@ REAL_TIMING = {
 }
 
 
+# Frames per second of each progressive standard: the device's frame clock.
+# (1080p tops out at 30: the HD pixel clock is 74.25 MHz.)
+FRAME_RATES = {
+    "480p": 59.94, "576p": 50.0,
+    "720p60": 60.0, "720p5994": 59.94, "720p50": 50.0,
+    "1080p30": 30.0, "1080p2997": 29.97, "1080p25": 25.0,
+    "1080p24": 24.0, "1080p2398": 23.98,
+}
+
+
 def timing_args(video_mode: str, real_timing: bool) -> list[str]:
     """Harness arguments for a real raster (full resolution only)."""
     if not real_timing:

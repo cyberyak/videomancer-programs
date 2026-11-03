@@ -296,7 +296,7 @@ class VPanel(QWidget):
         lfo = lv.lfos.get(self.sel)
         for name, (x, y) in MOD_KNOBS.items():
             active = lfo is not None and lfo.shape != "Off" and lfo.depth != 0
-            led = 0.5 + 0.5 * lfo.value(lv.sim_frame / 59.94) if active and self.motion else 0
+            led = 0.5 + 0.5 * lfo.value(lv.sim_frame / lv.frame_rate) if active and self.motion else 0
             self._knob(qp, x, y, self._lfo_value(name), name.upper(), led, ring=True)
         for n, (x, y) in KNOBS.items():
             pid = self.pid_for(n)

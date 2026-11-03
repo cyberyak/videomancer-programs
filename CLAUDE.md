@@ -23,6 +23,8 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
 - 7,680 LC and 32 EBR (4 Kbit each). No DSP multipliers, no frame buffer.
 - The stock core uses ~1,600 LC and 0 EBR, so a program gets ~6,000 LC.
 - Pixel clock is 74.25 MHz HD / 13.5 MHz SD. Deep pipelines, 1–2 adds per stage.
+- 1080p is at most 30 fps on the device (no 1080p60); 60 Hz modes are 720p, 480p and 1080i.
+  LFOs and video in the live window run on the mode's frame clock (`fastsim.FRAME_RATES`).
 - nextpnr prints `ADV7611_CLK … FAIL at 74.25 MHz` even for passthru, so treat it as baseline noise, not a regression.
   Compare against the passthru figure instead.
 
@@ -39,7 +41,7 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
   - 93 programs read the timing ID (`registers_in(8)`): they need real timing (`--real-timing`,
     "480p real"), which live picks automatically. The compact raster (SDK tester default) mis-scales them,
     and Bishop renders black. See `docs/fastsim-compat.md`.
-  - Sources: moving circles, images, video files (OpenCV, played on the 59.94 Hz device clock), camera,
+  - Sources: moving circles, images, video files (OpenCV), camera,
     Syphon (`syphon-python`) and NDI (`cyndilib`, bundles libndi).
   - MIDI (`mido` + `python-rtmidi`, `tools/fastsim/midi.py`): port menu, Learn, Faderfox UC4 preset.
     The UC4 preset's CCs (encoders 8-15, faders 32-39) are inferred, not from a Faderfox table.

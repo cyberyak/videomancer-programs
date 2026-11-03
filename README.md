@@ -59,7 +59,7 @@ Here czartroniks' Feedback runs on the moving-circles source.*
   - The 93 programs that size their graphics from the video standard open in 480p real automatically.
 - **Controls:** knobs, switches and the fader, labelled from each program's TOML.
 - **LFO per knob:** sine, triangle, saw, square or sample-and-hold, with a rate in Hz and
-  a bipolar depth. It runs on the device's 59.94 Hz frame clock.
+  a bipolar depth. It runs on the current video mode's real frame clock.
 - **Sources:**
   - Moving circles
   - Still images

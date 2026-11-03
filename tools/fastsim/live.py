@@ -11,8 +11,8 @@ Sources:
   Moving circles  bouncing circles generated on the fly (the input moves)
   any image       still images from test-images/ or a file you open
   video file      .mp4/.mov/... from test-images/ or a file you open; it
-                  plays on the device clock (one source frame per 59.94 Hz
-                  frame, like HDMI input) and loops
+                  plays on the device clock (the frame rate of the current
+                  video mode, like HDMI input) and loops
   Camera          a webcam, or a virtual camera that VS2/OBS can feed
                   (macOS asks for camera permission the first time)
   Syphon… / NDI…  live video from another app; pick a source when asked
@@ -20,8 +20,9 @@ Sources:
 LFOs: every knob and the fader has an LFO (sine, triangle, saw, square,
 sample & hold) with a rate in Hz and a bipolar depth (attenuverter, centre =
 none) that offsets the knob each frame. LFO time advances per simulated
-frame at 59.94 fps, so modulation matches the device frame-for-frame; the
-window itself runs slower than real time.
+frame at the mode's real frame rate (29.97 fps for 1080p, 59.94 for 480p, 60
+for 720p), so modulation matches the device frame-for-frame; the window itself
+may run slower than real time (the status line shows how much).
 
   python3 tools/fastsim/live.py [program_dir] [--mode "480p real"] [--video FILE]
 
@@ -114,7 +115,6 @@ def program_list() -> list[tuple[str, Path]]:
 LOG = fastsim.ROOT / "build/live.log"
 HARNESS_LOG = fastsim.ROOT / "build/live_harness.log"
 log = logging.getLogger("live")
-FRAME_RATE = 59.94                      # device frame rate for LFO time
 SHAPES = ["Off", "Sine", "Triangle", "Saw", "Square", "S&H"]
 
 
@@ -377,6 +377,7 @@ class Live(QWidget):
             log.info("%s needs real timing; using 480p real instead of %s", self.prog_dir.name, self.mode)
             self.mode = "480p real"
         video_mode, decimation, self.real_timing = MODES[self.mode]
+        self.frame_rate = fastsim.FRAME_RATES[video_mode]   # device clock for LFOs and video
         self._opened: str | None = None     # file chosen with "Open image/video…"
         self.program = fastsim.load_program(self.prog_dir.name, self.prog_dir.parent)
         self.vs = resolve_video_settings(video_mode, decimation)
@@ -899,12 +900,12 @@ class Live(QWidget):
         # Pipelined: the simulator works on frame N while Python decodes
         # frame N+1 and then shows frame N, so the two run on separate cores.
         if self.video is not None:
-            src = self.video.frame((self.sim_frame - self.video_start) / FRAME_RATE)
+            src = self.video.frame((self.sim_frame - self.video_start) / self.frame_rate)
         elif self.still is not None:
             src = self.still
         else:
             src = self.circles.frame()
-        t = self.sim_frame / FRAME_RATE
+        t = self.sim_frame / self.frame_rate
         self.sim_frame += 1
         values = dict(self.values)
         for pid, lfo in self.lfos.items():
@@ -936,8 +937,10 @@ class Live(QWidget):
         self.frames += 1
         now = time.time()
         if now - self.t_last >= 1:
-            self.status.setText(f"{self.frames / (now - self.t_last):.1f} fps  "
-                                f"{self.w}x{self.h} ({self.mode})")
+            fps = self.frames / (now - self.t_last)
+            self.status.setText(f"{fps:.1f} fps  {self.w}x{self.h} ({self.mode})\n"
+                                f"{100 * fps / self.frame_rate:.0f}% of device speed "
+                                f"({self.frame_rate:g} fps)")
             self.frames, self.t_last = 0, now
 
     def closeEvent(self, e):
