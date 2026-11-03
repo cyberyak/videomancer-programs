@@ -40,5 +40,6 @@ or have feedback show real motion. `--fps` sets the GIF playback rate (default 1
 ## Live window (for the user)
 
 `python3 tools/fastsim/live.py <program_dir>` opens a window with the program running continuously
-(about 30 fps at ÷4): TOML-labelled knobs and switches, and a "Moving circles" source or still images.
+(about 25 fps at ÷4): TOML-labelled knobs and switches, a per-knob LFO (shape, Hz, bipolar depth;
+time advances at 59.94 fps per simulated frame, like the device), and a "Moving circles" source or still images.
 Launch it in a terminal tab for the user; it needs a display, so it can't be used headless.

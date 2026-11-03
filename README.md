@@ -65,7 +65,7 @@ python3 tools/vm_preview.py programs/cyberyak/<name> \
 python3 tools/fastsim/fastsim.py simulate <program_dir> \
     --capture-frames 48 --output out.gif                     # animation
 python3 tools/fastsim/compare.py <program_dir> ...           # check against GHDL
-python3 tools/fastsim/live.py <program_dir>                  # live window: knobs, moving-circles source, ~30 fps
+python3 tools/fastsim/live.py <program_dir>                  # live window: knobs + LFOs, moving-circles source, ~25 fps
 tools/vm_package.sh <program_dir>                            # unsigned .vmprog -> out/ (see docs/hardware-test.md)
 python3 videomancer-sdk/tools/vhdl-image-tester/run.py       # SDK simulator GUI
 ```

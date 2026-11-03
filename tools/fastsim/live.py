@@ -11,6 +11,12 @@ Sources:
   Moving circles  bouncing circles generated on the fly (the input moves)
   any image       still images from test-images/ or a file you open
 
+LFOs: every knob and the fader has an LFO (sine, triangle, saw, square,
+sample & hold) with a rate in Hz and a bipolar depth (attenuverter, centre =
+none) that offsets the knob each frame. LFO time advances per simulated
+frame at 59.94 fps, so modulation matches the device frame-for-frame; the
+window itself runs slower than real time.
+
   python3 tools/fastsim/live.py <program_dir> [--decimation 4]
 
 Run with the bundled Python: `source tools/env.sh` first.
@@ -27,8 +33,9 @@ import numpy as np
 from PIL import Image, ImageDraw
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout,
-                             QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+                             QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSlider,
+                             QVBoxLayout, QWidget)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fastsim  # noqa: E402
@@ -36,6 +43,39 @@ from vhdl_image_tester.core.config import ABI_REG_VIDEO_TIMING, resolve_video_se
 from vhdl_image_tester.core.image_converter import prepare_image, rgb_to_yuv10, yuv10_to_rgb  # noqa: E402
 
 CIRCLES = "Moving circles"
+FRAME_RATE = 59.94                      # device frame rate for LFO time
+SHAPES = ["Off", "Sine", "Triangle", "Saw", "Square", "S&H"]
+
+
+class LFO:
+    """One modulation source; value(t) is in -1..1."""
+
+    def __init__(self, seed: int):
+        self.shape, self.rate, self.depth = "Off", 0.25, 0.0
+        self._rng = np.random.default_rng(seed)
+        self._cycle, self._held = -1, 0.0
+
+    def value(self, t: float) -> float:
+        p = t * self.rate
+        ph = p - np.floor(p)
+        if self.shape == "Sine":
+            return float(np.sin(2 * np.pi * ph))
+        if self.shape == "Triangle":
+            return float(4 * abs(ph - 0.5) - 1) * -1
+        if self.shape == "Saw":
+            return float(2 * ph - 1)
+        if self.shape == "Square":
+            return 1.0 if ph < 0.5 else -1.0
+        if self.shape == "S&H":
+            if int(np.floor(p)) != self._cycle:
+                self._cycle, self._held = int(np.floor(p)), float(self._rng.uniform(-1, 1))
+            return self._held
+        return 0.0
+
+    def apply(self, base: int, t: float) -> int:
+        if self.shape == "Off" or self.depth == 0:
+            return base
+        return int(np.clip(round(base + self.depth * 512 * self.value(t)), 0, 1023))
 
 
 class Circles:
@@ -87,6 +127,9 @@ class Live(QWidget):
         self.circles = Circles(self.w, self.h)
         self.still: Image.Image | None = None
         self.values: dict[str, int] = {}
+        self.lfos: dict[str, LFO] = {}
+        self.readouts: dict[str, QLabel] = {}
+        self.sim_frame = 0
         self.frames, self.t_last = 0, time.time()
         self._build_ui()
         self.timer = QTimer(self)
@@ -139,22 +182,65 @@ class Live(QWidget):
                 self.values[p.parameter_id] = int(p.initial_toggle_state)
                 ctl.addWidget(box, r, 0, 1, 2)
             else:
+                pid = p.parameter_id
                 s = QSlider(Qt.Orientation.Horizontal)
                 s.setRange(0, 1023)
                 s.setValue(p.initial_pot_value)
-                s.valueChanged.connect(lambda v, pid=p.parameter_id: self._set(pid, v))
-                self.values[p.parameter_id] = p.initial_pot_value
-                ctl.addWidget(QLabel(p.name_label), r, 0)
+                s.valueChanged.connect(lambda v, pid=pid: self._set(pid, v))
+                self.values[pid] = p.initial_pot_value
+                readout = QLabel(str(p.initial_pot_value))
+                readout.setFixedWidth(36)
+                self.readouts[pid] = readout
+                ctl.addWidget(QLabel(f"<b>{p.name_label}</b>"), r, 0)
                 ctl.addWidget(s, r, 1)
+                ctl.addWidget(readout, r, 2)
+                r += 1
+                # LFO row: shape, rate (Hz), depth (bipolar attenuverter)
+                lfo = self.lfos[pid] = LFO(seed=len(self.lfos) + 1)
+                shape = QComboBox()
+                shape.addItems(SHAPES)
+                shape.currentTextChanged.connect(lambda t, l=lfo: setattr(l, "shape", t))
+                rate = QDoubleSpinBox()
+                rate.setRange(0.01, 20.0)
+                rate.setDecimals(2)
+                rate.setSingleStep(0.05)
+                rate.setValue(lfo.rate)
+                rate.setSuffix(" Hz")
+                rate.valueChanged.connect(lambda v, l=lfo: setattr(l, "rate", v))
+                depth = QSlider(Qt.Orientation.Horizontal)
+                depth.setRange(-100, 100)
+                depth.setValue(0)
+                depth.setToolTip("LFO depth, -100..100 % (centre = none)")
+                depth.valueChanged.connect(lambda v, l=lfo: setattr(l, "depth", v / 100))
+                row = QHBoxLayout()
+                row.addWidget(QLabel("  LFO"))
+                row.addWidget(shape)
+                row.addWidget(rate)
+                row.addWidget(depth, 1)
+                ctl.addLayout(row, r, 0, 1, 3)
             r += 1
+        reset = QPushButton("All LFOs off")
+        reset.clicked.connect(self._lfos_off)
+        ctl.addWidget(reset, r, 0, 1, 3)
+        self._shape_boxes = [w for w in self.findChildren(QComboBox) if w is not self.source]
+        r += 1
         ctl.setRowStretch(r, 1)
         side = QWidget()
         side.setLayout(ctl)
-        side.setFixedWidth(330)
-        root.addWidget(side)
+        scroll = QScrollArea()
+        scroll.setWidget(side)
+        scroll.setWidgetResizable(True)
+        scroll.setFixedWidth(470)
+        root.addWidget(scroll)
 
     def _set(self, pid, v):
         self.values[pid] = v
+
+    def _lfos_off(self):
+        for box in self._shape_boxes:
+            box.setCurrentText("Off")
+        for lfo in self.lfos.values():
+            lfo.shape = "Off"
 
     def _toggle_play(self):
         if self.timer.isActive():
@@ -179,7 +265,13 @@ class Live(QWidget):
     # -- simulation ---------------------------------------------------------
     def tick(self):
         src = self.still if self.still is not None else self.circles.frame()
-        regs = self.program.build_register_array(self.values)
+        t = self.sim_frame / FRAME_RATE
+        self.sim_frame += 1
+        values = dict(self.values)
+        for pid, lfo in self.lfos.items():
+            values[pid] = lfo.apply(self.values[pid], t)
+            self.readouts[pid].setText(str(values[pid]))
+        regs = self.program.build_register_array(values)
         regs[ABI_REG_VIDEO_TIMING] = self.vs.timing_id
         self.proc.stdin.write((",".join(map(str, regs)) + "\n").encode())
         self.proc.stdin.write(rgb_to_yuv10(src).astype("<u2").tobytes())
