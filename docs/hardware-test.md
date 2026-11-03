@@ -59,7 +59,9 @@ Kaleido processes incoming video, so it needs a source. Ways to feed it:
   timing configs run processing programs without input, which needs checking
   on hardware. Space is limited: about 900 LC and 1 EBR left.
 
-For simulation, the live preview has a built-in "Moving circles" source:
+For simulation, the live preview has a built-in "Moving circles" source (crash and
+error logs: `build/live.log`, `build/live_harness.log`; the GHDL window via
+`tools/sim_gui.sh` logs to `build/ghdl_gui.log`):
 
 ```bash
 python3 tools/fastsim/live.py programs/cyberyak/kaleido

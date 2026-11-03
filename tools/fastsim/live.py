@@ -19,14 +19,22 @@ window itself runs slower than real time.
 
   python3 tools/fastsim/live.py <program_dir> [--decimation 4]
 
+Errors never close the window: they are logged with a traceback to
+build/live.log and shown in a dialog. Native crashes (segfaults) are also
+written there by faulthandler; the simulator process logs to
+build/live_harness.log.
+
 Run with the bundled Python: `source tools/env.sh` first.
 """
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import logging
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -34,7 +42,7 @@ from PIL import Image, ImageDraw
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-                             QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSlider,
+                             QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QSlider,
                              QVBoxLayout, QWidget)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -43,6 +51,9 @@ from vhdl_image_tester.core.config import ABI_REG_VIDEO_TIMING, resolve_video_se
 from vhdl_image_tester.core.image_converter import prepare_image, rgb_to_yuv10, yuv10_to_rgb  # noqa: E402
 
 CIRCLES = "Moving circles"
+LOG = fastsim.ROOT / "build/live.log"
+HARNESS_LOG = fastsim.ROOT / "build/live_harness.log"
+log = logging.getLogger("live")
 FRAME_RATE = 59.94                      # device frame rate for LFO time
 SHAPES = ["Off", "Sine", "Triangle", "Saw", "Square", "S&H"]
 
@@ -122,8 +133,12 @@ class Live(QWidget):
             raise SystemExit("live preview supports progressive modes only")
         self.w, self.h = self.vs.sim_width, self.vs.sim_height
         exe = fastsim.build(self.prog_dir, self.vs.fpga_config)
+        log.info("program %s, %dx%d (%s), simulator %s", self.prog_dir, self.w, self.h,
+                 self.vs.fpga_config, exe)
+        self._harness_err = open(HARNESS_LOG, "ab")
         self.proc = subprocess.Popen([str(exe), "--serve", str(self.w), str(self.h)],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=self._harness_err)
         self.circles = Circles(self.w, self.h)
         self.still: Image.Image | None = None
         self.values: dict[str, int] = {}
@@ -252,6 +267,7 @@ class Live(QWidget):
 
     def _source_changed(self, i):
         text = self.source.itemText(i)
+        log.info("source: %s", text)
         if text == CIRCLES:
             self.still = None
         elif text == "Open image…":
@@ -264,6 +280,23 @@ class Live(QWidget):
 
     # -- simulation ---------------------------------------------------------
     def tick(self):
+        # Any failure stops playback once (one dialog, not one per frame).
+        try:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"simulator process exited (code {self.proc.returncode})")
+            self._tick()
+        except Exception as e:
+            self.timer.stop()
+            self.play.setText("Play")
+            log.exception("frame %d failed; playback stopped", self.sim_frame)
+            self.status.setText("stopped on error, see build/live.log")
+            QMessageBox.critical(self, "Live preview stopped",
+                                 f"{type(e).__name__}: {e}\n\nFull traceback in {LOG}\n"
+                                 f"Simulator output in {HARNESS_LOG}\n\n"
+                                 + ("Close and reopen the window to restart the simulator."
+                                    if self.proc.poll() is not None else "Press Play to retry."))
+
+    def _tick(self):
         src = self.still if self.still is not None else self.circles.frame()
         t = self.sim_frame / FRAME_RATE
         self.sim_frame += 1
@@ -279,9 +312,8 @@ class Live(QWidget):
         n = self.w * self.h * 3 * 2
         buf = self.proc.stdout.read(n)
         if len(buf) != n:
-            self.timer.stop()
-            self.status.setText("simulator stopped")
-            return
+            raise RuntimeError(f"simulator returned {len(buf)} of {n} bytes "
+                               f"(exit code {self.proc.poll()})")
         out = yuv10_to_rgb(np.frombuffer(buf, "<u2").reshape(self.h, self.w, 3))
         self.out_lbl.setPixmap(_pix(out))
         self.in_lbl.setPixmap(_pix(src))
@@ -304,11 +336,32 @@ def _pix(im: Image.Image) -> QPixmap:
     return QPixmap.fromImage(q.copy())
 
 
+def _setup_logging():
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                        handlers=[logging.FileHandler(LOG), logging.StreamHandler()])
+    # Native crashes (segfault, abort) write their Python stack here too.
+    faulthandler.enable(open(LOG, "a"), all_threads=True)
+
+    def excepthook(kind, value, tb):
+        # PyQt6 aborts on an unhandled exception in a callback unless a hook
+        # is set; log it and keep the window alive instead.
+        text = "".join(traceback.format_exception(kind, value, tb))
+        log.error("unhandled exception:\n%s", text)
+        if QApplication.instance() is not None:
+            QMessageBox.critical(None, "Live preview error",
+                                 f"{kind.__name__}: {value}\n\nFull traceback in {LOG}")
+
+    sys.excepthook = excepthook
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("program_dir", type=Path)
     ap.add_argument("--decimation", type=int, default=4, choices=[2, 4, 8])
     a = ap.parse_args()
+    _setup_logging()
+    log.info("---- live preview start ----")
     app = QApplication(sys.argv)
     w = Live(a.program_dir, a.decimation)
     w.show()
