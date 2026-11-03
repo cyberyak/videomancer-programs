@@ -100,30 +100,55 @@ VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
 class VideoSource:
     """A video file (frame-accurate on the device clock, looping) or a camera."""
 
+    CAMERA_HELP = ("If macOS blocked it: System Settings > Privacy & Security > Camera, "
+                   "allow the app this runs in (Claude or Terminal), then reopen the window. "
+                   "A virtual camera (VS2/OBS) may be Camera 1 or 2.")
+
     def __init__(self, spec: str | int, w: int, h: int):
         import cv2
         self.cv2, self.w, self.h = cv2, w, h
-        self.cap = cv2.VideoCapture(spec)
-        if not self.cap.isOpened():
-            raise RuntimeError(f"cannot open video source {spec!r}")
         self.camera = isinstance(spec, int)
+        self.cap = (cv2.VideoCapture(spec, cv2.CAP_AVFOUNDATION) if self.camera
+                    else cv2.VideoCapture(spec))
+        if not self.cap.isOpened():
+            raise RuntimeError(f"cannot open {'camera' if self.camera else 'video'} {spec!r}."
+                               + (" " + self.CAMERA_HELP if self.camera else ""))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         self.count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if not self.camera else 0
         self.pos = -1           # index of the frame in self.last
         self.last: Image.Image | None = None
-        log.info("video %s: %.2f fps, %d frames", spec, self.fps, self.count)
+        self.misses = 0
+        if self.camera:
+            # Cameras deliver nothing for a moment after opening: wait up to
+            # ~3 s for the first frame instead of failing on the first read.
+            for _ in range(30):
+                ok, bgr = self.cap.read()
+                if ok:
+                    self.last = self._convert(bgr)
+                    break
+                time.sleep(0.1)
+            else:
+                self.cap.release()
+                raise RuntimeError(f"camera {spec} opened but sent no frames in 3 s. "
+                                   + self.CAMERA_HELP)
+        log.info("%s %s: %.2f fps, %d frames", "camera" if self.camera else "video",
+                 spec, self.fps, self.count)
 
-    def _read(self) -> Image.Image:
-        ok, bgr = self.cap.read()
-        if not ok:
-            raise RuntimeError("video read failed")
+    def _convert(self, bgr) -> Image.Image:
         rgb = self.cv2.cvtColor(bgr, self.cv2.COLOR_BGR2RGB)
         return prepare_image(Image.fromarray(rgb), self.w, self.h)
 
     def frame(self, t: float) -> Image.Image:
         """Frame shown at device time t (seconds since the source started)."""
         if self.camera:
-            self.last = self._read()
+            ok, bgr = self.cap.read()
+            if ok:
+                self.last, self.misses = self._convert(bgr), 0
+            else:
+                # Ride out short dropouts on the last good frame (~2 s).
+                self.misses += 1
+                if self.misses > 120:
+                    raise RuntimeError("camera stopped sending frames. " + self.CAMERA_HELP)
             return self.last
         want = int(t * self.fps) % self.count if self.count > 0 else int(t * self.fps)
         if want < self.pos or self.last is None:          # looped or first frame
@@ -259,7 +284,8 @@ class Live(QWidget):
             self.source.addItem(p.name, str(p))
         self.source.addItem("Open image…")
         self.source.addItem("Open video…")
-        self.source.addItem("Camera")
+        for cam in range(3):
+            self.source.addItem(f"Camera {cam}", cam)
         self.source.currentIndexChanged.connect(self._source_changed)
         ctl.addWidget(QLabel("Source"), r, 0)
         ctl.addWidget(self.source, r, 1)
@@ -360,8 +386,8 @@ class Live(QWidget):
         data = self.source.itemData(i)
         if text == CIRCLES:
             pass
-        elif text == "Camera":
-            self._start_video(0)
+        elif text.startswith("Camera "):
+            self._start_video(int(data))
         elif text == "Open video…":
             path, _ = QFileDialog.getOpenFileName(
                 self, "Video", str(fastsim.ROOT),
