@@ -30,6 +30,12 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
 - Simulation is GHDL, still image only, about 60 s per frame at decimation 4. There is no live or real-time input.
 - Final check is on hardware: copy the `.vmprog` to the SD card `programs/` folder (FAT32).
 
+## Tracking
+- Jira space **VM – Videomancer** at cyberyak.atlassian.net (cloudId `dd2327c3-0138-475a-be96-743584522509`), Kanban.
+  Use the Atlassian connector's `createJiraIssue` with `projectKey: "VM"`.
+- VM-1: fast simulation (Verilator), scoped in `docs/fast-sim-scope.md`.
+- Publishing to GitHub or the community repo is public. Confirm with the user before pushing a PR upstream.
+
 ## Memory and skills
 - `.claude/rules/`: project knowledge. `vhdl-conventions.md` loads when touching `.vhd`/`.toml`.
   Add a new rule file when we learn something non-obvious, such as a hardware quirk or a timing trick.

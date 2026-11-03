@@ -26,7 +26,7 @@ under the same path and submitted as a pull request
 |---|---|
 | `programs/cyberyak/` | Our programs (`<name>.vhd`, `<name>.toml`, optional `model/`, `README.md`) |
 | `tools/` | `env.sh` (toolchain), `vm_build.sh` (synth + resources), `vm_preview.py` (simulate → comparison sheet) |
-| `docs/` | Notes and plans, e.g. [fast simulation scope](docs/fast-sim-scope.md) |
+| `docs/` | Notes and plans, e.g. [fast simulation scope](docs/fast-sim-scope.md) (Jira: [VM-1](https://cyberyak.atlassian.net/browse/VM-1)) |
 | `test-images/` | Simulation inputs |
 | `videomancer-sdk/`, `videomancer-community-programs/` | Upstream repos as git submodules (read-only references) |
 | `CLAUDE.md`, `.claude/` | Project memory, rules and skills for Claude Code |
