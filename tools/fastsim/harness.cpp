@@ -16,7 +16,7 @@
 // testbench, it can capture several consecutive frames.
 //
 // Usage: harness IN.raw OUT.raw W H INTERLACED WARMUP CAPTURE REGS
-//        harness --serve W H        (see serve() below)
+//        harness --serve W H [--rgb M0..M8]   (see serve() below)
 //   IN.raw   W*H*3 uint16 (Y,U,V per pixel, row-major), 10-bit values
 //   OUT.raw  CAPTURE*W*H*3 uint16 in the same layout (fields weaved)
 //   REGS     32 comma-separated register values (0-1023)
@@ -24,6 +24,7 @@
 #include "verilated.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -94,36 +95,93 @@ static void set_regs(Vvm_fastsim_top &top, const int *regs) {
     top.r28 = regs[28]; top.r29 = regs[29]; top.r30 = regs[30]; top.r31 = regs[31];
 }
 
+// BT.601 limited-range conversions, matching the SDK tester's
+// image_converter.py (same matrices, numpy-style round-half-even, clipping)
+// so RGB serve mode gives bit-identical results to converting in Python.
+// The inverse matrix is passed in from Python (np.linalg.inv) for the same
+// floating-point values.
+static const double M_RGB2YUV[3][3] = {
+    {0.299, 0.587, 0.114},
+    {-0.168736, -0.331264, 0.500000},
+    {0.500000, -0.418688, -0.081312},
+};
+static double clip(double x, double lo, double hi) { return x < lo ? lo : (x > hi ? hi : x); }
+
+static void rgb_to_yuv10(const uint8_t *rgb, uint16_t *yuv, size_t n) {
+    for (size_t i = 0; i < n; i++, rgb += 3, yuv += 3) {
+        double r = rgb[0] / 255.0, g = rgb[1] / 255.0, b = rgb[2] / 255.0;
+        double y = M_RGB2YUV[0][0] * r + M_RGB2YUV[0][1] * g + M_RGB2YUV[0][2] * b;
+        double u = M_RGB2YUV[1][0] * r + M_RGB2YUV[1][1] * g + M_RGB2YUV[1][2] * b;
+        double v = M_RGB2YUV[2][0] * r + M_RGB2YUV[2][1] * g + M_RGB2YUV[2][2] * b;
+        yuv[0] = (uint16_t)std::nearbyint(clip(y * (940 - 64) + 64, 64, 940));
+        yuv[1] = (uint16_t)std::nearbyint(clip(u * (960 - 64) + 512, 64, 960));
+        yuv[2] = (uint16_t)std::nearbyint(clip(v * (960 - 64) + 512, 64, 960));
+    }
+}
+
+static void yuv10_to_rgb(const uint16_t *yuv, uint8_t *rgb, size_t n, const double inv[9]) {
+    for (size_t i = 0; i < n; i++, rgb += 3, yuv += 3) {
+        double y = (yuv[0] - 64.0) / (940 - 64);
+        double u = (yuv[1] - 512.0) / (960 - 64);
+        double v = (yuv[2] - 512.0) / (960 - 64);
+        for (int c = 0; c < 3; c++)
+            rgb[c] = (uint8_t)std::nearbyint(clip((inv[3 * c] * y + inv[3 * c + 1] * u + inv[3 * c + 2] * v) * 255.0, 0, 255));
+    }
+}
+
 // Serve mode: keep one simulation alive across frames (state such as spin
 // and the tile store carries over). Per frame, stdin carries one text line
-// of 32 comma-separated registers followed by W*H*3 uint16 (progressive);
-// stdout returns the captured W*H*3 uint16 output of that frame.
-static int serve(int w, int h) {
+// of 32 comma-separated registers followed by the input frame; stdout
+// returns the captured output of that frame. Frames are W*H*3 uint16 YUV
+// (progressive), or with --rgb M0..M8 (the YUV->RGB inverse matrix)
+// W*H*3 uint8 RGB in both directions.
+static int serve(int w, int h, const double *inv) {
     Sim s;
     s.w = w; s.field_h = h; s.warmup_fields = 0; s.capture_fields = 1;
     s.target = (size_t)w * h * 3;
+    size_t px = (size_t)w * h;
     std::vector<uint16_t> img(s.target), out(s.target);
+    std::vector<uint8_t> rgb(inv ? s.target : 0);
     char line[4096];
     int regs[32];
     while (fgets(line, sizeof line, stdin)) {
         memset(regs, 0, sizeof regs);
         char *tok = strtok(line, ",\n");
         for (int i = 0; i < 32 && tok; i++, tok = strtok(nullptr, ",\n")) regs[i] = atoi(tok);
-        if (fread(img.data(), 2, img.size(), stdin) != img.size()) return 1;
+        if (inv) {
+            if (fread(rgb.data(), 1, rgb.size(), stdin) != rgb.size()) return 1;
+            rgb_to_yuv10(rgb.data(), img.data(), px);
+        } else if (fread(img.data(), 2, img.size(), stdin) != img.size()) {
+            return 1;
+        }
         set_regs(s.top, regs);
         s.captured.clear(); s.capturing = false; s.out_field = 0;
         s.field(img.data(), 0, 1, true);
         size_t got = s.captured.size(), pad = s.target - got;
         for (size_t i = 0; i < pad; i += 3) { out[i] = 64; out[i + 1] = 512; out[i + 2] = 512; }
         memcpy(out.data() + pad, s.captured.data(), got * 2);
-        fwrite(out.data(), 2, out.size(), stdout);
+        if (inv) {
+            yuv10_to_rgb(out.data(), rgb.data(), px, inv);
+            fwrite(rgb.data(), 1, rgb.size(), stdout);
+        } else {
+            fwrite(out.data(), 2, out.size(), stdout);
+        }
         fflush(stdout);
     }
     return 0;
 }
 
 int main(int argc, char **argv) {
-    if (argc == 4 && strcmp(argv[1], "--serve") == 0) return serve(atoi(argv[2]), atoi(argv[3]));
+    if (argc >= 4 && strcmp(argv[1], "--serve") == 0) {
+        if (argc == 4) return serve(atoi(argv[2]), atoi(argv[3]), nullptr);
+        if (argc == 14 && strcmp(argv[4], "--rgb") == 0) {
+            double inv[9];
+            for (int i = 0; i < 9; i++) inv[i] = strtod(argv[5 + i], nullptr);
+            return serve(atoi(argv[2]), atoi(argv[3]), inv);
+        }
+        fprintf(stderr, "usage: %s --serve W H [--rgb M0 .. M8]\n", argv[0]);
+        return 2;
+    }
     if (argc != 9) {
         fprintf(stderr, "usage: %s IN.raw OUT.raw W H INTERLACED WARMUP CAPTURE REGS\n", argv[0]);
         return 2;

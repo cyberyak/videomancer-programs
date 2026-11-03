@@ -53,7 +53,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fastsim  # noqa: E402
 from vhdl_image_tester.core.config import ABI_REG_VIDEO_TIMING, resolve_video_settings  # noqa: E402
-from vhdl_image_tester.core.image_converter import prepare_image, rgb_to_yuv10, yuv10_to_rgb  # noqa: E402
+from vhdl_image_tester.core.image_converter import _M_YUV_TO_RGB, prepare_image  # noqa: E402
 
 CIRCLES = "Moving circles"
 LOG = fastsim.ROOT / "build/live.log"
@@ -205,9 +205,14 @@ class Live(QWidget):
         log.info("program %s, %dx%d (%s), simulator %s", self.prog_dir, self.w, self.h,
                  self.vs.fpga_config, exe)
         self._harness_err = open(HARNESS_LOG, "ab")
-        self.proc = subprocess.Popen([str(exe), "--serve", str(self.w), str(self.h)],
+        # RGB in and out: the simulator converts with the SDK tester's BT.601
+        # maths (inverse matrix passed as exact doubles), saving ~10 ms of
+        # Python per frame.
+        self.proc = subprocess.Popen([str(exe), "--serve", str(self.w), str(self.h), "--rgb",
+                                      *(repr(float(c)) for c in _M_YUV_TO_RGB.flatten())],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self._harness_err)
+        self.inflight: Image.Image | None = None    # input of the frame being simulated
         self.circles = Circles(self.w, self.h)
         self.still: Image.Image | None = None
         self.video: VideoSource | None = None
@@ -392,6 +397,8 @@ class Live(QWidget):
                                     if self.proc.poll() is not None else "Press Play to retry."))
 
     def _tick(self):
+        # Pipelined: the simulator works on frame N while Python decodes
+        # frame N+1 and then shows frame N, so the two run on separate cores.
         if self.video is not None:
             src = self.video.frame((self.sim_frame - self.video_start) / FRAME_RATE)
         elif self.still is not None:
@@ -406,17 +413,24 @@ class Live(QWidget):
             self.readouts[pid].setText(str(values[pid]))
         regs = self.program.build_register_array(values)
         regs[ABI_REG_VIDEO_TIMING] = self.vs.timing_id
+        if self.inflight is not None:
+            n = self.w * self.h * 3
+            buf = self.proc.stdout.read(n)
+            if len(buf) != n:
+                raise RuntimeError(f"simulator returned {len(buf)} of {n} bytes "
+                                   f"(exit code {self.proc.poll()})")
+            out = np.frombuffer(buf, np.uint8).reshape(self.h, self.w, 3)
+            shown = self.inflight
+        else:
+            out = shown = None
         self.proc.stdin.write((",".join(map(str, regs)) + "\n").encode())
-        self.proc.stdin.write(rgb_to_yuv10(src).astype("<u2").tobytes())
+        self.proc.stdin.write(np.asarray(src.convert("RGB"), np.uint8).tobytes())
         self.proc.stdin.flush()
-        n = self.w * self.h * 3 * 2
-        buf = self.proc.stdout.read(n)
-        if len(buf) != n:
-            raise RuntimeError(f"simulator returned {len(buf)} of {n} bytes "
-                               f"(exit code {self.proc.poll()})")
-        out = yuv10_to_rgb(np.frombuffer(buf, "<u2").reshape(self.h, self.w, 3))
-        self.out_lbl.setPixmap(_pix(out))
-        self.in_lbl.setPixmap(_pix(src))
+        self.inflight = src
+        if out is None:
+            return
+        self.out_lbl.setPixmap(_pix_rgb(out))
+        self.in_lbl.setPixmap(_pix(shown))
         self.frames += 1
         now = time.time()
         if now - self.t_last >= 1:
@@ -433,7 +447,10 @@ class Live(QWidget):
 
 
 def _pix(im: Image.Image) -> QPixmap:
-    a = np.ascontiguousarray(np.asarray(im.convert("RGB")))
+    return _pix_rgb(np.ascontiguousarray(np.asarray(im.convert("RGB"))))
+
+
+def _pix_rgb(a: np.ndarray) -> QPixmap:
     q = QImage(a.data, a.shape[1], a.shape[0], 3 * a.shape[1], QImage.Format.Format_RGB888)
     return QPixmap.fromImage(q.copy())
 
