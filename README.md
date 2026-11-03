@@ -8,9 +8,11 @@ by cyberyak. Programs are VHDL for the iCE40 HX4K, built with the official
 
 | Program | Status | What |
 |---|---|---|
-| [kaleido](programs/cyberyak/kaleido/) | design + Python model | True 2-D kaleidoscope: radial mandala, square, triangle and hex mirror groups ([design](programs/cyberyak/kaleido/DESIGN.md)) |
+| [kaleido](programs/cyberyak/kaleido/) | v0.1: square mode (p4m), simulated; not yet tried on hardware | True 2-D kaleidoscope. Square mode works; radial, triangle and hex are planned ([design](programs/cyberyak/kaleido/DESIGN.md)) |
 
-![kaleido model preview](programs/cyberyak/kaleido/model/out/contact_sheet.png)
+![kaleido spinning, VHDL simulated with fastsim](programs/cyberyak/kaleido/media/spin.gif)
+
+![kaleido angle sweep](programs/cyberyak/kaleido/media/angle_sweep.png)
 
 ### Path to the community library
 

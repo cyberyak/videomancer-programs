@@ -21,6 +21,9 @@ source tools/env.sh && python3 tools/vm_preview.py $ARGUMENTS
   - `toggle_switch_7`…`_11` (0 or 1023)
   - `linear_potentiometer_12`
   - See `<name>.toml` for labels and defaults.
+- `--warmup N`: frames before capture (default 2, like the SDK tester). Programs that measure the frame
+  or fill a store over several frames need more (kaleido: 4). Otherwise the preview shows a
+  half-settled frame.
 - Default image is `test-images/shapes.png`. Other test images are in `test-images/`.
 - The tool prints the sheet's path (`build/preview/<name>/sheet.png`).
   Open it with Read to check it, then send it to the user.

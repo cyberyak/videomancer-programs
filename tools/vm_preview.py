@@ -32,23 +32,24 @@ DEFAULT_IMAGE = ROOT / "test-images/shapes.png"
 TILE_W, LABEL_H, GAP = 480, 22, 8
 
 
-def simulate_fast(prog_dir, image, sets, decimation, out_png):
+def simulate_fast(prog_dir, image, sets, decimation, warmup, out_png):
     sys.path.insert(0, str(ROOT / "tools/fastsim"))
     import fastsim
     program = fastsim.load_program(prog_dir.name, prog_dir.parent)
     values = fastsim._load_registers(program, sets, None)
     try:
-        frames = fastsim.simulate(prog_dir, Image.open(image), values,
-                                  decimation=decimation, log=lambda *_: None)
+        frames = fastsim.simulate(prog_dir, Image.open(image), values, decimation=decimation,
+                                  warmup_frames=warmup, log=lambda *_: None)
     except RuntimeError as e:
         sys.exit(f"simulation failed for {sets or 'defaults'}:\n{e}")
     frames[-1].save(out_png)
 
 
-def simulate(prog_dir, image, sets, decimation, out_png):
+def simulate(prog_dir, image, sets, decimation, warmup, out_png):
     cmd = [sys.executable, str(CLI), "simulate", prog_dir.name,
            "--programs-dir", str(prog_dir.parent), "--image", str(image),
-           "--decimation", str(decimation), "--output", str(out_png)]
+           "--decimation", str(decimation), "--warmup-frames", str(warmup),
+           "--output", str(out_png)]
     for s in sets:
         cmd += ["--set", s]
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -82,6 +83,8 @@ def main():
     ap.add_argument("--sweep", metavar="KEY=V1,V2,...")
     ap.add_argument("--decimation", type=int, default=4)
     ap.add_argument("--engine", choices=["fast", "ghdl"], default="fast")
+    ap.add_argument("--warmup", type=int, default=2,
+                    help="frames before capture; raise it for programs that settle over frames")
     ap.add_argument("--out", type=Path)
     a = ap.parse_args()
     run_sim = simulate_fast if a.engine == "fast" else simulate
@@ -101,7 +104,7 @@ def main():
     for i, (label, sets) in enumerate(runs):
         png = work / f"run{i}.png"
         print(f"[{i + 1}/{len(runs)}] {label} ...", flush=True)
-        run_sim(prog, a.image, sets, a.decimation, png)
+        run_sim(prog, a.image, sets, a.decimation, a.warmup, png)
         tiles.append((label, Image.open(png)))
 
     out = a.out or work / "sheet.png"

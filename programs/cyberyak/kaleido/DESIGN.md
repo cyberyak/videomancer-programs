@@ -1,5 +1,18 @@
 # Kaleido: a true 2-D kaleidoscope for Videomancer
 
+## Status (2026-11-03)
+
+v0.1 implements **square mode (p4m)** in `kaleido.vhd`.
+
+- **Simulation:** fastsim output is bit-identical to GHDL.
+- **Synthesis:**
+  - HD: 5,219 LC and 28/32 EBR, Fmax 54.8 MHz (the same reported figure as passthru).
+  - SD: 5,299 LC, passes 27 MHz.
+- **Not yet tried on hardware.**
+- **Previews:** the store settles over 3 frames, so use `--warmup 4`.
+
+Next modes, in order: triangle (*333), hex (*632), radial. About 2,400 LC remain.
+
 Preview from the reference model: `model/out/contact_sheet.png`
 (regenerate with `python3 model/kaleido_model.py model/input.png model/out`).
 

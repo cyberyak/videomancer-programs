@@ -1,0 +1,124 @@
+# Copyright (C) 2026 cyberyak
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Kaleido Program Configuration
+
+[program]
+program_id = "com.cyberyak.kaleido"
+program_name = "Kaleido"
+program_version = "0.1.0"
+abi_version = ">=1.0,<2.0"
+author = "cyberyak"
+license = "GPL-3.0"
+categories = ["Mirror", "Pattern"]
+program_type = "processing"
+description = "2-D kaleidoscope: a captured window of the input folded into a spinning square mirror tiling (p4m)"
+hardware_compatibility = ["rev_b"]
+core = "yuv444_30b"
+url = "https://github.com/cyberyak/videomancer-programs"
+
+[[parameter]]
+parameter_id = "rotary_potentiometer_1"
+name_label = "Angle"
+control_mode = "polar_degs_360"
+initial_value = 0
+
+[[parameter]]
+parameter_id = "rotary_potentiometer_2"
+name_label = "Zoom"
+control_mode = "linear"
+display_min_value = 0
+display_max_value = 100
+initial_value = 600
+display_float_digits = 1
+suffix_label = "%"
+
+[[parameter]]
+parameter_id = "rotary_potentiometer_3"
+name_label = "Spin"
+control_mode = "linear"
+display_min_value = -100
+display_max_value = 100
+initial_value = 512
+display_float_digits = 1
+suffix_label = "%"
+
+[[parameter]]
+parameter_id = "rotary_potentiometer_4"
+name_label = "Source X"
+control_mode = "linear"
+display_min_value = -100
+display_max_value = 100
+initial_value = 512
+display_float_digits = 1
+suffix_label = "%"
+
+[[parameter]]
+parameter_id = "rotary_potentiometer_5"
+name_label = "Source Y"
+control_mode = "linear"
+display_min_value = -100
+display_max_value = 100
+initial_value = 512
+display_float_digits = 1
+suffix_label = "%"
+
+[[parameter]]
+parameter_id = "rotary_potentiometer_6"
+name_label = "Window"
+control_mode = "linear"
+display_min_value = 0
+display_max_value = 100
+initial_value = 600
+display_float_digits = 1
+suffix_label = "%"
+
+[[parameter]]
+parameter_id = "toggle_switch_7"
+name_label = "Mirror"
+value_labels = ["Mirror", "Repeat"]
+initial_value_label = "Mirror"
+
+[[parameter]]
+parameter_id = "toggle_switch_8"
+name_label = "Diagonal"
+value_labels = ["On", "Off"]
+initial_value_label = "On"
+
+[[parameter]]
+parameter_id = "toggle_switch_9"
+name_label = "Capture"
+value_labels = ["Live", "Freeze"]
+initial_value_label = "Live"
+
+[[parameter]]
+parameter_id = "toggle_switch_10"
+name_label = "Seams"
+value_labels = ["Off", "Glow"]
+initial_value_label = "Off"
+
+[[parameter]]
+parameter_id = "linear_potentiometer_12"
+name_label = "Mix"
+control_mode = "linear"
+display_min_value = 0
+display_max_value = 100
+initial_value = 1023
+display_float_digits = 1
+suffix_label = "%"
+
+[[preset]]
+name = "Still Tiles"
+rotary_potentiometer_1 = 0
+rotary_potentiometer_2 = 600
+rotary_potentiometer_3 = 512
+
+[[preset]]
+name = "Slow Spin"
+rotary_potentiometer_2 = 450
+rotary_potentiometer_3 = 600
+
+[[preset]]
+name = "Wallpaper"
+rotary_potentiometer_2 = 850
+toggle_switch_8 = 1
