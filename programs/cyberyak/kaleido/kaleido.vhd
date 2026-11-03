@@ -18,15 +18,18 @@
 --     Square    p4m   mirror lines on the tile edges (+ one diagonal)
 --     Triangle  *333  the classic three-mirror toy kaleidoscope
 --     Hex       *632  triangle + its median mirror (Triangle with Diagonal)
+--     Radial    D_n   mandala of 2n mirrored wedges (polar-mapped)
 --   A kaleidoscope shows one fundamental region many times, so the coarse
 --   store still fills the screen.
 --
---   Version 0.2: square, triangle and hex (see DESIGN.md for radial).
+--   Version 0.3: square, triangle, hex and radial.
 --
 -- Resources:
 --   Luma store  16384 x 6 bit (inferred EBR, 24 blocks)
 --   Chroma store 2048 x 8 bit (inferred EBR, 4 blocks): U4 & V4
---   1x sin_cos_full_lut_10x10, 3x interpolator_u, no hardware multipliers
+--   Quarter-wave sine ROM 256 x 9 bit (inferred EBR, 1 block)
+--   Dry-video delay 256 x 30 bit circular buffer (inferred EBR, 2 blocks)
+--   3x interpolator_u, no hardware multipliers
 --
 -- Coordinates:
 --   (u, v) are 24-bit signed, 1.0 tile = 2^16. Per frame a vblank sequencer
@@ -58,6 +61,16 @@
 --   at the Cartesian point X = s + t/2, Y = t * sqrt3/2, so T shows an
 --   undistorted equilateral triangle of the captured window.
 --
+-- Radial fold (dihedral D_n, n = 2..16 even):
+--   (|u|, |v|) in 1/256 tile -> 10-iteration CORDIC vectoring, two
+--   iterations per stage: z = atan2 (90 deg = 1024), x = 1.6468 * r. The
+--   angle is folded into 2n mirrored wedges (column = triangle wave of
+--   z * n / 2048) and the radius into rings one tile apart (row; mirrored
+--   with Diagonal on, repeated with it off). The store is read in polar
+--   form, so each wedge shows the window bent into a sector: a mandala,
+--   not an undistorted slice (that needs a second CORDIC, which does not
+--   fit next to the other modes).
+--
 -- Capture:
 --   col = (x - xc) * r + 64 * 256, row likewise (r = store cells per pixel
 --   x 256, capped at 256 so every cell is written), written every active
@@ -65,16 +78,16 @@
 --   Y is stored rounded to 6 bits, U/V to 4.
 --
 -- Pipeline (data_in -> data_out):
---         square path                    triangle path
 --   P0    register (u, v) and input
---   P1    tile fraction + mirror         y' partial sums
---   P2    diagonal swap, address         y'
---   P3    (delay)                        x' = u - y'/2
---   P4    (delay)                        d = I - J, f, g, f + g
---   P5    (delay)                        m = d mod 3, upper
---   P6    (delay)                        affine map -> (s, t)
---   P7    (delay)                        hex swap, seam flag
---   P8    address mux                    X, Y -> address
+--         square path        triangle path            radial path
+--   P1    fraction, mirror   y' partial sums          |u|, |v|
+--   P2    diagonal, address  y'                       CORDIC 0, 1
+--   P3    (delay)            x' = u - y'/2            CORDIC 2, 3
+--   P4    (delay)            d = I - J, f, g, f + g   CORDIC 4, 5
+--   P5    (delay)            m = d mod 3, upper       CORDIC 6, 7
+--   P6    (delay)            affine map -> (s, t)     CORDIC 8, 9
+--   P7    (delay)            hex swap, seam flag      wedge + ring fold
+--   P8    address mux        X, Y -> address
 --   P9    store read
 --   P10   expand to 10 bit, seam glow
 --   P11   pad
@@ -86,18 +99,20 @@
 --   Single-bank store: fast motion inside the window can tear (use Freeze).
 --
 -- Register map:
---   Pot 1  (registers_in(0))    Angle      static rotation, 0..360 deg
+--   Pot 1  (registers_in(0))    Angle      static rotation, 0..360 deg;
+--                               in radial: Segments n = 2, 4 .. 16
 --   Pot 2  (registers_in(1))    Zoom       tile size (up = larger tiles)
 --   Pot 3  (registers_in(2))    Spin       rotation speed, bipolar
 --   Pot 4  (registers_in(3))    Source X   capture window pan
 --   Pot 5  (registers_in(4))    Source Y   capture window pan
 --   Pot 6  (registers_in(5))    Window     capture window size
---   Tog 7  (registers_in(6)(0)) Mirror / Repeat (square only)
+--   Tog 7  (registers_in(6)(0)) Layout lattice / radial
 --   Tog 8  (registers_in(6)(1)) Diagonal on / off (square p4m vs pmm,
---                               triangle: on = hex *632, off = *333)
+--                               triangle: on = hex *632, off = *333,
+--                               radial: mirrored vs repeated rings)
 --   Tog 9  (registers_in(6)(2)) Capture live / freeze
 --   Tog 10 (registers_in(6)(3)) Seams off / glow
---   Tog 11 (registers_in(6)(4)) Shape square / triangle
+--   Tog 11 (registers_in(6)(4)) Shape square / triangle (lattice layout)
 --   Fader  (registers_in(7))    Mix        dry/wet
 --------------------------------------------------------------------------------
 library ieee;
@@ -132,11 +147,12 @@ architecture kaleido of program_top is
     signal s_pan_x      : unsigned(9 downto 0);
     signal s_pan_y      : unsigned(9 downto 0);
     signal s_window     : unsigned(9 downto 0);
-    signal s_repeat     : std_logic;
+    signal s_radial     : std_logic;
     signal s_diag_off   : std_logic;
     signal s_freeze     : std_logic;
     signal s_seams      : std_logic;
     signal s_triangle   : std_logic;
+    signal s_segments   : unsigned(3 downto 0);   -- m = n/2, 1..8
     signal s_mix        : unsigned(9 downto 0);
 
     -- ------------------------------------------------------------------------
@@ -162,8 +178,32 @@ architecture kaleido of program_top is
 
     signal s_spin_acc   : unsigned(15 downto 0) := (others => '0');
     signal s_angle      : unsigned(9 downto 0) := (others => '0');
-    signal s_sin        : signed(9 downto 0);
-    signal s_cos        : signed(9 downto 0);
+    signal s_sin        : signed(9 downto 0) := (others => '0');
+    signal s_cos        : signed(9 downto 0) := (others => '0');
+    -- Quarter-wave sine ROM (1 EBR), read twice per frame for sin and cos
+    type t_qsin is array (0 to 255) of integer range 0 to 511;
+    constant C_QSIN : t_qsin := (   -- 511 * sin(2 pi (i + 0.5) / 1024)
+          2,   5,   8,  11,  14,  17,  20,  24,  27,  30,  33,  36,  39,  42,  45,  49,
+         52,  55,  58,  61,  64,  67,  70,  73,  77,  80,  83,  86,  89,  92,  95,  98,
+        101, 104, 107, 110, 113, 117, 120, 123, 126, 129, 132, 135, 138, 141, 144, 147,
+        150, 153, 156, 159, 162, 165, 168, 171, 174, 177, 180, 182, 185, 188, 191, 194,
+        197, 200, 203, 206, 209, 211, 214, 217, 220, 223, 226, 228, 231, 234, 237, 239,
+        242, 245, 248, 251, 253, 256, 259, 261, 264, 267, 269, 272, 275, 277, 280, 283,
+        285, 288, 290, 293, 296, 298, 301, 303, 306, 308, 311, 313, 316, 318, 321, 323,
+        325, 328, 330, 333, 335, 337, 340, 342, 344, 347, 349, 351, 353, 356, 358, 360,
+        362, 365, 367, 369, 371, 373, 375, 378, 380, 382, 384, 386, 388, 390, 392, 394,
+        396, 398, 400, 402, 404, 406, 408, 410, 411, 413, 415, 417, 419, 420, 422, 424,
+        426, 427, 429, 431, 433, 434, 436, 437, 439, 441, 442, 444, 445, 447, 448, 450,
+        451, 453, 454, 456, 457, 459, 460, 461, 463, 464, 465, 467, 468, 469, 470, 472,
+        473, 474, 475, 476, 477, 478, 480, 481, 482, 483, 484, 485, 486, 487, 488, 489,
+        489, 490, 491, 492, 493, 494, 495, 495, 496, 497, 498, 498, 499, 500, 500, 501,
+        501, 502, 503, 503, 504, 504, 505, 505, 506, 506, 507, 507, 507, 508, 508, 508,
+        509, 509, 509, 509, 510, 510, 510, 510, 510, 511, 511, 511, 511, 511, 511, 511
+    );
+    signal s_rom_angle  : unsigned(9 downto 0) := (others => '0');
+    signal s_rom_q      : unsigned(8 downto 0) := (others => '0');
+    signal s_rom_neg    : std_logic := '0';
+    signal s_rom_wait   : integer range 0 to 4 := 0;
     signal s_k          : unsigned(C_MUL_STEPS - 1 downto 0) := (others => '0');
     signal s_r          : unsigned(C_MUL_STEPS - 1 downto 0) := (others => '0');
     signal s_xc         : signed(23 downto 0) := (others => '0');
@@ -208,6 +248,31 @@ architecture kaleido of program_top is
     signal p7_s, p7_t       : unsigned(10 downto 0) := (others => '0');
     signal p7_seam          : std_logic := '0';
 
+    -- Radial path: first-quadrant CORDIC vectoring, 2 iterations per stage
+    type t_cx is array (1 to 6) of signed(15 downto 0);
+    type t_cz is array (1 to 6) of signed(11 downto 0);
+    signal cr_x, cr_y       : t_cx := (others => (others => '0'));
+    signal cr_z             : t_cz := (others => (others => '0'));
+    signal p7_raddr         : unsigned(13 downto 0) := (others => '0');
+    signal p7_rseam         : std_logic := '0';
+    -- atan(2^-i) with 90 degrees = 1024
+    type t_atan is array (0 to 9) of integer;
+    constant C_ATAN : t_atan := (512, 302, 160, 81, 41, 20, 10, 5, 3, 1);
+
+    -- |u| in 1/256 tile, saturated to 12 bits (radial covers +-16 tiles)
+    function abs_sat(u : signed(23 downto 0)) return signed is
+        variable a : signed(12 downto 0);
+    begin
+        if u(23 downto 20) = "0000" or u(23 downto 20) = "1111" then
+            a := u(20 downto 8);
+        elsif u(23) = '0' then
+            a := to_signed(4095, 13);
+        else
+            a := to_signed(-4095, 13);
+        end if;
+        return resize(abs(a), 16);
+    end function;
+
     -- Shared tail
     signal p8_addr_y        : unsigned(13 downto 0) := (others => '0');
     signal p8_seam, p9_seam : std_logic := '0';
@@ -240,6 +305,10 @@ architecture kaleido of program_top is
     signal s_wr_c           : std_logic_vector(7 downto 0) := x"88";
 
     signal s_dry_y, s_dry_u, s_dry_v : std_logic_vector(9 downto 0);
+    type t_dry_ram is array (0 to 255) of std_logic_vector(29 downto 0);
+    signal ram_dry          : t_dry_ram;
+    signal s_dry_ptr        : unsigned(7 downto 0) := (others => '0');
+    signal s_dry_q          : std_logic_vector(29 downto 0) := (others => '0');
     signal s_mix_y, s_mix_u, s_mix_v : unsigned(9 downto 0);
     signal s_mix_y_valid, s_mix_u_valid, s_mix_v_valid : std_logic;
 
@@ -265,15 +334,28 @@ begin
     s_pan_x      <= unsigned(registers_in(3));
     s_pan_y      <= unsigned(registers_in(4));
     s_window     <= unsigned(registers_in(5));
-    s_repeat     <= registers_in(6)(0);
+    s_radial     <= registers_in(6)(0);
     s_diag_off   <= registers_in(6)(1);
     s_freeze     <= registers_in(6)(2);
     s_seams      <= registers_in(6)(3);
     s_triangle   <= registers_in(6)(4);
+    s_segments   <= resize(s_angle_knob(9 downto 7), 4) + 1;
     s_mix        <= unsigned(registers_in(7));
 
-    sin_cos_inst : entity work.sin_cos_full_lut_10x10
-        port map(angle_in => std_logic_vector(s_angle), sin_out => s_sin, cos_out => s_cos);
+    -- sin(a) from a quarter wave: mirror the index in odd quadrants, negate
+    -- in the lower half. Registered read so it maps to block RAM.
+    p_sin_rom : process(clk)
+        variable v_idx : unsigned(7 downto 0);
+    begin
+        if rising_edge(clk) then
+            v_idx := s_rom_angle(7 downto 0);
+            if s_rom_angle(8) = '1' then
+                v_idx := not v_idx;
+            end if;
+            s_rom_q   <= to_unsigned(C_QSIN(to_integer(v_idx)), 9);
+            s_rom_neg <= s_rom_angle(9);
+        end if;
+    end process p_sin_rom;
 
     -- ========================================================================
     -- Raster tracking, per-frame sequencer, DDA and capture counters
@@ -284,6 +366,7 @@ begin
         variable v_dz        : signed(10 downto 0);
         variable v_res       : signed(39 downto 0);
         variable v_r         : unsigned(C_MUL_STEPS - 1 downto 0);
+        variable v_angle     : unsigned(9 downto 0);
     begin
         if rising_edge(clk) then
             v_avid_fall := data_in.avid = '0' and s_avid_prev = '1';
@@ -338,7 +421,15 @@ begin
                     v_dz := (others => '0');
                 end if;
                 s_spin_acc <= unsigned(signed(s_spin_acc) + resize(v_dz, 16));
-                s_angle    <= s_angle_knob + s_spin_acc(15 downto 6);
+                -- In radial mode knob 1 sets the segment count instead
+                if s_radial = '1' then
+                    v_angle := s_spin_acc(15 downto 6);
+                else
+                    v_angle := s_angle_knob + s_spin_acc(15 downto 6);
+                end if;
+                s_angle     <= v_angle;
+                s_rom_angle <= v_angle + 256;   -- cos(a) = sin(a + 90 deg)
+                s_rom_wait  <= 4;
                 -- k: tile step per pixel (2^16 = one tile); r: store cells
                 -- per pixel x 256. Both scale with the measured width.
                 s_k  <= shift_left(resize(to_unsigned(543, 10) - s_zoom(9 downto 1), C_MUL_STEPS), s_shift);
@@ -356,6 +447,17 @@ begin
                 s_seq_busy <= '1';
                 s_seq_idx  <= 0;
                 s_seq_step <= C_MUL_STEPS;   -- "load" step for product 0
+            elsif s_rom_wait /= 0 then
+                -- Two ROM reads (cos, then sin) before the products start
+                case s_rom_wait is
+                    when 4 => s_rom_angle <= s_angle;
+                    when 3 => if s_rom_neg = '1' then s_cos <= -signed(resize(s_rom_q, 10));
+                              else s_cos <= signed(resize(s_rom_q, 10)); end if;
+                    when 2 => if s_rom_neg = '1' then s_sin <= -signed(resize(s_rom_q, 10));
+                              else s_sin <= signed(resize(s_rom_q, 10)); end if;
+                    when others => null;
+                end case;
+                s_rom_wait <= s_rom_wait - 1;
             elsif s_seq_busy = '1' then
                 if s_seq_step = C_MUL_STEPS then
                     -- Load the operands of product s_seq_idx
@@ -458,6 +560,14 @@ begin
         variable v_s, v_t   : unsigned(10 downto 0);
         variable v_x, v_y   : unsigned(10 downto 0);
         variable v_col      : unsigned(6 downto 0);
+        variable v_cx, v_cy, v_cx0 : signed(15 downto 0);
+        variable v_cz       : signed(11 downto 0);
+        variable v_ang      : unsigned(9 downto 0);
+        variable v_prod     : unsigned(13 downto 0);
+        variable v_rcol     : unsigned(6 downto 0);
+        variable v_rrow     : unsigned(6 downto 0);
+        variable v_rad      : unsigned(14 downto 0);
+        variable v_rpos     : unsigned(14 downto 0);
         constant C_ONE      : unsigned(10 downto 0) := to_unsigned(1024, 11);
     begin
         if rising_edge(clk) then
@@ -471,10 +581,10 @@ begin
             -- P1: tile fraction, mirrored on odd tiles
             v_fu := unsigned(p0_u(15 downto 9));
             v_fv := unsigned(p0_v(15 downto 9));
-            if s_repeat = '0' and p0_u(16) = '1' then
+            if p0_u(16) = '1' then
                 v_fu := not v_fu;
             end if;
-            if s_repeat = '0' and p0_v(16) = '1' then
+            if p0_v(16) = '1' then
                 v_fv := not v_fv;
             end if;
             p1_fu <= v_fu;
@@ -557,8 +667,72 @@ begin
                 p7_seam <= '0';
             end if;
 
+            -- ---------------------------------------------------------------
+            -- Radial path (P1..P7)
+            -- ---------------------------------------------------------------
+            -- P1: fold to the first quadrant (valid: segment counts are even)
+            cr_x(1) <= abs_sat(p0_u);
+            cr_y(1) <= abs_sat(p0_v);
+            cr_z(1) <= (others => '0');
+
+            -- P2..P6: CORDIC vectoring, iterations 2(k-2) and 2(k-2)+1;
+            -- x -> 1.6468 * r, z -> atan2(y, x)
+            for k in 2 to 6 loop
+                v_cx := cr_x(k - 1);
+                v_cy := cr_y(k - 1);
+                v_cz := cr_z(k - 1);
+                for j in 0 to 1 loop
+                    v_cx0 := v_cx;
+                    if v_cy >= 0 then
+                        v_cx := v_cx + shift_right(v_cy, 2 * (k - 2) + j);
+                        v_cy := v_cy - shift_right(v_cx0, 2 * (k - 2) + j);
+                        v_cz := v_cz + C_ATAN(2 * (k - 2) + j);
+                    else
+                        v_cx := v_cx - shift_right(v_cy, 2 * (k - 2) + j);
+                        v_cy := v_cy + shift_right(v_cx0, 2 * (k - 2) + j);
+                        v_cz := v_cz - C_ATAN(2 * (k - 2) + j);
+                    end if;
+                end loop;
+                cr_x(k) <= v_cx;
+                cr_y(k) <= v_cy;
+                cr_z(k) <= v_cz;
+            end loop;
+
+            -- P7: fold the angle into one of 2n mirrored wedges (column) and
+            -- the radius into rings one tile apart (row)
+            if cr_z(6) < 0 then
+                v_ang := (others => '0');
+            elsif cr_z(6) > 1023 then
+                v_ang := (others => '1');
+            else
+                v_ang := unsigned(cr_z(6)(9 downto 0));
+            end if;
+            v_prod := (others => '0');                -- angle * n / 2 (n = 2m)
+            for b in 0 to 3 loop
+                if s_segments(b) = '1' then
+                    v_prod := v_prod + shift_left(resize(v_ang, 14), b);
+                end if;
+            end loop;
+            v_rcol := v_prod(9 downto 3);
+            if v_prod(10) = '1' then
+                v_rcol := not v_rcol;
+            end if;
+            -- radius / (256 * 1.6468) * 128 ~= x * (1/4 + 1/16 - 1/256)
+            v_rad := unsigned(cr_x(6)(14 downto 0));
+            v_rpos := shift_right(v_rad, 2) + shift_right(v_rad, 4) - shift_right(v_rad, 8);
+            v_rrow := v_rpos(6 downto 0);
+            if s_diag_off = '0' and v_rpos(7) = '1' then
+                v_rrow := not v_rrow;
+            end if;
+            p7_raddr <= v_rrow & v_rcol;
+            if v_rcol = 0 or v_rcol = 127 or (s_diag_off = '0' and (v_rrow = 0 or v_rrow = 127)) then
+                p7_rseam <= s_seams;
+            else
+                p7_rseam <= '0';
+            end if;
+
             -- P8: Cartesian store address (X = s + t/2, Y = t * sqrt3/2), or
-            -- the square path's address
+            -- the square or radial path's address
             v_x := p7_s + shift_right(p7_t, 1);
             v_y := p7_t - shift_right(p7_t, 3) - shift_right(p7_t, 7);
             if v_x(10) = '1' then
@@ -566,7 +740,10 @@ begin
             else
                 v_col := v_x(9 downto 3);
             end if;
-            if s_triangle = '1' then
+            if s_radial = '1' then
+                p8_addr_y <= p7_raddr;
+                p8_seam   <= p7_rseam;
+            elsif s_triangle = '1' then
                 p8_addr_y <= v_y(9 downto 3) & v_col;
                 p8_seam   <= p7_seam;
             else
@@ -629,33 +806,38 @@ begin
     -- ========================================================================
     p_delay : process(clk)
         type t_sync_delay is array (0 to C_PROCESSING_DELAY_CLKS - 1) of std_logic;
-        type t_data_delay is array (0 to C_WET_CLKS - 1) of std_logic_vector(9 downto 0);
         variable v_avid  : t_sync_delay := (others => '0');
         variable v_hsync : t_sync_delay := (others => '1');
         variable v_vsync : t_sync_delay := (others => '1');
         variable v_field : t_sync_delay := (others => '1');
-        variable v_y     : t_data_delay := (others => (others => '0'));
-        variable v_u     : t_data_delay := (others => (others => '0'));
-        variable v_v     : t_data_delay := (others => (others => '0'));
     begin
         if rising_edge(clk) then
             v_avid  := data_in.avid    & v_avid(0 to C_PROCESSING_DELAY_CLKS - 2);
             v_hsync := data_in.hsync_n & v_hsync(0 to C_PROCESSING_DELAY_CLKS - 2);
             v_vsync := data_in.vsync_n & v_vsync(0 to C_PROCESSING_DELAY_CLKS - 2);
             v_field := data_in.field_n & v_field(0 to C_PROCESSING_DELAY_CLKS - 2);
-            v_y     := data_in.y & v_y(0 to C_WET_CLKS - 2);
-            v_u     := data_in.u & v_u(0 to C_WET_CLKS - 2);
-            v_v     := data_in.v & v_v(0 to C_WET_CLKS - 2);
 
             data_out.avid    <= v_avid(C_PROCESSING_DELAY_CLKS - 1);
             data_out.hsync_n <= v_hsync(C_PROCESSING_DELAY_CLKS - 1);
             data_out.vsync_n <= v_vsync(C_PROCESSING_DELAY_CLKS - 1);
             data_out.field_n <= v_field(C_PROCESSING_DELAY_CLKS - 1);
-            s_dry_y <= v_y(C_WET_CLKS - 1);
-            s_dry_u <= v_u(C_WET_CLKS - 1);
-            s_dry_v <= v_v(C_WET_CLKS - 1);
         end if;
     end process p_delay;
+
+    -- Dry video delayed by C_WET_CLKS in a 256-deep circular buffer (2 EBR)
+    -- instead of ~360 flip-flops: written every clock, read C_WET_CLKS - 1
+    -- entries back (the registered read adds the last clock).
+    p_dry_delay : process(clk)
+    begin
+        if rising_edge(clk) then
+            ram_dry(to_integer(s_dry_ptr)) <= data_in.y & data_in.u & data_in.v;
+            s_dry_q   <= ram_dry(to_integer(s_dry_ptr - (C_WET_CLKS - 1)));
+            s_dry_ptr <= s_dry_ptr + 1;
+        end if;
+    end process p_dry_delay;
+    s_dry_y <= s_dry_q(29 downto 20);
+    s_dry_u <= s_dry_q(19 downto 10);
+    s_dry_v <= s_dry_q(9 downto 0);
 
     data_out.y <= std_logic_vector(s_mix_y);
     data_out.u <= std_logic_vector(s_mix_u);

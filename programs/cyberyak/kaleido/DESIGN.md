@@ -2,26 +2,33 @@
 
 ## Status (2026-11-03)
 
-v0.2 implements three of the four modes in `kaleido.vhd`:
+v0.3 implements all four modes in `kaleido.vhd`:
 
 | Mode | Group | Switches |
 |---|---|---|
-| Square | p4m, or pmm with Diagonal off | S11 = Square |
-| Triangle | *333, the toy kaleidoscope | S11 = Triangle, S8 Diagonal = Off |
-| Hex | *632 / p6m | S11 = Triangle, S8 Diagonal = On |
+| Square | p4m, or pmm with Diagonal off | S7 = Lattice, S11 = Square |
+| Triangle | *333, the toy kaleidoscope | S7 = Lattice, S11 = Triangle, S8 Diagonal = Off |
+| Hex | *632 / p6m | S7 = Lattice, S11 = Triangle, S8 Diagonal = On |
+| Radial | D_n mandala, n = 2..16 even (knob 1) | S7 = Radial. S8 picks mirrored or repeated rings |
 
-- **Simulation:** all three modes are bit-identical in fastsim and GHDL.
+- **Simulation:** every mode is bit-identical in fastsim and GHDL, including the dry/wet mix.
 - **Synthesis:**
-  - HD: 6,198 LC and 28/32 EBR. Fmax is reported as 52.4 MHz, against 56–57 for passthru; the HD "FAIL" line also appears for passthru, so this needs confirming on hardware.
-  - SD: 6,249 LC, passes 27 MHz.
+  - HD: 6,771 / 7,680 LC (88%) and 31/32 EBR. Fmax is reported as 51.0 MHz, against 56–57 for passthru; the HD "FAIL" line also appears for passthru, so this needs confirming on hardware.
+  - SD: 6,851 LC, passes 27 MHz.
 - **Not yet tried on hardware.**
 - **Previews:** the store settles over 3 frames, so use `--warmup 4`.
 
-**Triangle fold:** this replaced the iterative reflections planned in §3. In skewed lattice coordinates the fold is one of six 0/±1 affine maps, chosen by `(I − J) mod 3` and the triangle half. `model/derive_tri_maps.py` derives the maps and verifies them on 20,000 points.
+**Triangle fold:** this replaced the iterative reflections planned in §3. In skewed lattice coordinates the fold is one of six 0/±1 affine maps, chosen by `(I − J) mod 3` and the triangle half. `model/derive_tri_maps.py` derives the maps and verifies them on 20,000 points. Hex is the triangle fold plus a swap.
 
-**Hex:** the triangle fold plus a swap of (s, t). It costs almost nothing.
+**Radial:** this differs from §3. A full CORDIC there and back did not fit, so radial reads the store in **polar form**:
+- column = folded angle
+- row = radius, as rings one tile apart
 
-Radial remains (CORDIC). With about 1,400 LC left it may need to be its own program.
+Each wedge shows the window bent into a sector (a mandala), not an undistorted slice. The CORDIC uses two iterations per stage, so it fits the existing pipeline with no extra latency.
+
+**Area savings that made room for radial:**
+- The SDK's combinational sin/cos LUT (571 LC) became a quarter-wave ROM in 1 EBR, read twice per frame during vblank.
+- The 12-clock dry-video delay (~360 flip-flops) became a 256-deep circular buffer in 2 EBR.
 
 ## 1. What the hardware allows
 
