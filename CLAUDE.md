@@ -15,7 +15,7 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
 - `test-images/`: inputs for simulation. `build/`: generated output (safe to delete).
 
 ## Toolchain
-- Always `source tools/env.sh` first. It provides GHDL/Yosys/nextpnr and Python 3.11 with Pillow, NumPy and PyQt6.
+- Always `source tools/env.sh` first. It provides GHDL/Yosys/nextpnr and Python 3.11 with Pillow, NumPy, PyQt6, jsonschema and OpenCV.
   System Python is 3.9 and too old. Homebrew is not installed.
 - The FPGA Makefile breaks on paths with spaces.
 
@@ -34,7 +34,8 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
     don't trust fastsim alone for those programs yet.
 - fastsim reuses private helpers from the SDK tester (`_ordered_sdk_sources`, `_load_registers`).
   Recheck them after updating the SDK submodule.
-- `tools/fastsim/live.py <dir>`: live window, about 25 fps, knobs plus per-knob LFOs and a moving-circles source.
+- `tools/fastsim/live.py <dir> [--video F]`: live window, about 21–25 fps, knobs plus per-knob LFOs.
+  - Sources: moving circles, images, video files (OpenCV, played on the 59.94 Hz device clock), camera.
   - Errors are logged to `build/live.log`, never fatal; the simulator process logs to `build/live_harness.log`.
   - Read those logs first when the user reports a crash.
 - `tools/sim_gui.sh`: SDK GHDL window with logging to `build/ghdl_gui.log`.

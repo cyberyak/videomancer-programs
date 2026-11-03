@@ -50,7 +50,7 @@ cd videomancer-programs
 mkdir -p videomancer-sdk/build && cd videomancer-sdk/build
 curl -L -o oss.tgz https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2025-05-23/oss-cad-suite-darwin-arm64-20250523.tgz
 tar -zxf oss.tgz && rm oss.tgz && cd ../..
-source tools/env.sh && python3 -m pip install pillow numpy PyQt6
+source tools/env.sh && python3 -m pip install pillow numpy PyQt6 jsonschema opencv-python-headless
 ```
 
 The path must not contain spaces, because the SDK's FPGA Makefile breaks on them.
@@ -65,7 +65,7 @@ python3 tools/vm_preview.py programs/cyberyak/<name> \
 python3 tools/fastsim/fastsim.py simulate <program_dir> \
     --capture-frames 48 --output out.gif                     # animation
 python3 tools/fastsim/compare.py <program_dir> ...           # check against GHDL
-python3 tools/fastsim/live.py <program_dir>                  # live window: knobs + LFOs, moving-circles source, ~25 fps
+python3 tools/fastsim/live.py <program_dir> [--video F]      # live window: knobs + LFOs; circles, image, video or camera source
 tools/vm_package.sh <program_dir>                            # unsigned .vmprog -> out/ (see docs/hardware-test.md)
 python3 videomancer-sdk/tools/vhdl-image-tester/run.py       # SDK simulator GUI
 ```

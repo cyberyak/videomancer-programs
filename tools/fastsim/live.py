@@ -10,6 +10,11 @@ switches and the fader come from the program's TOML and act immediately.
 Sources:
   Moving circles  bouncing circles generated on the fly (the input moves)
   any image       still images from test-images/ or a file you open
+  video file      .mp4/.mov/... from test-images/ or a file you open; it
+                  plays on the device clock (one source frame per 59.94 Hz
+                  frame, like HDMI input) and loops
+  Camera          a webcam, or a virtual camera that VS2/OBS can feed
+                  (macOS asks for camera permission the first time)
 
 LFOs: every knob and the fader has an LFO (sine, triangle, saw, square,
 sample & hold) with a rate in Hz and a bipolar depth (attenuverter, centre =
@@ -17,7 +22,7 @@ none) that offsets the knob each frame. LFO time advances per simulated
 frame at 59.94 fps, so modulation matches the device frame-for-frame; the
 window itself runs slower than real time.
 
-  python3 tools/fastsim/live.py <program_dir> [--decimation 4]
+  python3 tools/fastsim/live.py <program_dir> [--decimation 4] [--video FILE]
 
 Errors never close the window: they are logged with a traceback to
 build/live.log and shown in a dialog. Native crashes (segfaults) are also
@@ -89,6 +94,53 @@ class LFO:
         return int(np.clip(round(base + self.depth * 512 * self.value(t)), 0, 1023))
 
 
+VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm")
+
+
+class VideoSource:
+    """A video file (frame-accurate on the device clock, looping) or a camera."""
+
+    def __init__(self, spec: str | int, w: int, h: int):
+        import cv2
+        self.cv2, self.w, self.h = cv2, w, h
+        self.cap = cv2.VideoCapture(spec)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"cannot open video source {spec!r}")
+        self.camera = isinstance(spec, int)
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+        self.count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT)) if not self.camera else 0
+        self.pos = -1           # index of the frame in self.last
+        self.last: Image.Image | None = None
+        log.info("video %s: %.2f fps, %d frames", spec, self.fps, self.count)
+
+    def _read(self) -> Image.Image:
+        ok, bgr = self.cap.read()
+        if not ok:
+            raise RuntimeError("video read failed")
+        rgb = self.cv2.cvtColor(bgr, self.cv2.COLOR_BGR2RGB)
+        return prepare_image(Image.fromarray(rgb), self.w, self.h)
+
+    def frame(self, t: float) -> Image.Image:
+        """Frame shown at device time t (seconds since the source started)."""
+        if self.camera:
+            self.last = self._read()
+            return self.last
+        want = int(t * self.fps) % self.count if self.count > 0 else int(t * self.fps)
+        if want < self.pos or self.last is None:          # looped or first frame
+            self.cap.set(self.cv2.CAP_PROP_POS_FRAMES, 0)
+            self.pos = -1
+        while self.pos < want:                            # skip ahead
+            if self.pos < want - 1:
+                self.cap.grab()
+            else:
+                self.last = self._read()
+            self.pos += 1
+        return self.last
+
+    def close(self):
+        self.cap.release()
+
+
 class Circles:
     """Bouncing, overlapping circles over a slow gradient."""
 
@@ -141,6 +193,8 @@ class Live(QWidget):
                                      stderr=self._harness_err)
         self.circles = Circles(self.w, self.h)
         self.still: Image.Image | None = None
+        self.video: VideoSource | None = None
+        self.video_start = 0
         self.values: dict[str, int] = {}
         self.lfos: dict[str, LFO] = {}
         self.readouts: dict[str, QLabel] = {}
@@ -178,7 +232,12 @@ class Live(QWidget):
         self.source.addItem(CIRCLES)
         for p in sorted((fastsim.ROOT / "test-images").glob("*.png")):
             self.source.addItem(p.name, str(p))
+        for p in sorted(q for q in (fastsim.ROOT / "test-images").iterdir()
+                        if q.suffix.lower() in VIDEO_EXTS):
+            self.source.addItem(p.name, str(p))
         self.source.addItem("Open image…")
+        self.source.addItem("Open video…")
+        self.source.addItem("Camera")
         self.source.currentIndexChanged.connect(self._source_changed)
         ctl.addWidget(QLabel("Source"), r, 0)
         ctl.addWidget(self.source, r, 1)
@@ -265,11 +324,30 @@ class Live(QWidget):
             self.timer.start(0)
             self.play.setText("Pause")
 
+    def _start_video(self, spec):
+        self.video = VideoSource(spec, self.w, self.h)
+        self.video_start = self.sim_frame
+
     def _source_changed(self, i):
         text = self.source.itemText(i)
         log.info("source: %s", text)
+        if self.video is not None:
+            self.video.close()
+            self.video = None
+        self.still = None
+        data = self.source.itemData(i)
         if text == CIRCLES:
-            self.still = None
+            pass
+        elif text == "Camera":
+            self._start_video(0)
+        elif text == "Open video…":
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Video", str(fastsim.ROOT),
+                "Video (" + " ".join("*" + e for e in VIDEO_EXTS) + ")")
+            if path:
+                self._start_video(path)
+        elif data and Path(data).suffix.lower() in VIDEO_EXTS:
+            self._start_video(data)
         elif text == "Open image…":
             path, _ = QFileDialog.getOpenFileName(self, "Image", str(fastsim.ROOT),
                                                   "Images (*.png *.jpg *.jpeg *.bmp *.tif)")
@@ -297,7 +375,12 @@ class Live(QWidget):
                                     if self.proc.poll() is not None else "Press Play to retry."))
 
     def _tick(self):
-        src = self.still if self.still is not None else self.circles.frame()
+        if self.video is not None:
+            src = self.video.frame((self.sim_frame - self.video_start) / FRAME_RATE)
+        elif self.still is not None:
+            src = self.still
+        else:
+            src = self.circles.frame()
         t = self.sim_frame / FRAME_RATE
         self.sim_frame += 1
         values = dict(self.values)
@@ -327,6 +410,8 @@ class Live(QWidget):
     def closeEvent(self, e):
         self.timer.stop()
         self.proc.kill()
+        if self.video is not None:
+            self.video.close()
         super().closeEvent(e)
 
 
@@ -359,11 +444,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("program_dir", type=Path)
     ap.add_argument("--decimation", type=int, default=4, choices=[2, 4, 8])
+    ap.add_argument("--video", help="start with this video file as the source")
     a = ap.parse_args()
     _setup_logging()
     log.info("---- live preview start ----")
     app = QApplication(sys.argv)
     w = Live(a.program_dir, a.decimation)
+    if a.video:
+        w.source.addItem(Path(a.video).name, str(Path(a.video).resolve()))
+        w.source.setCurrentIndex(w.source.count() - 1)
     w.show()
     sys.exit(app.exec())
 
