@@ -474,15 +474,11 @@ class Live(QWidget):
         new.move(self.pos())
         new.show()
         _windows.append(new)
-        idx, text = self.source.currentIndex(), self.source.currentText()
-        opened = self._opened
+        text, data = self.source.currentText(), self.source.currentData()
+        if text.startswith("Open"):
+            text, data = (Path(self._opened).name, self._opened) if self._opened else ("", None)
         self.close()                    # releases the camera / video first
-        # Carry the source over; a file picked with "Open…" is re-added by path
-        if text.startswith("Open") and opened:
-            new.source.addItem(Path(opened).name, opened)
-            new.source.setCurrentIndex(new.source.count() - 1)
-        elif not text.startswith("Open"):
-            new.source.setCurrentIndex(idx)
+        new.select_source(text, data)
 
     def _lfos_off(self):
         for shape, _, _ in self.lfo_widgets.values():
@@ -502,7 +498,24 @@ class Live(QWidget):
         self.video = VideoSource(spec, self.w, self.h)
         self.video_start = self.sim_frame
 
+    def select_source(self, text: str, data) -> None:
+        """Select a source by what it is (menu text + data), adding a file
+        that isn't in this window's menu (e.g. one given with --video)."""
+        if not text:
+            return
+        for j in range(self.source.count()):
+            if self.source.itemText(j) == text and self.source.itemData(j) == data:
+                self.source.setCurrentIndex(j)
+                return
+        if isinstance(data, str) and Path(data).exists():
+            self.source.addItem(Path(data).name, data)
+            self.source.setCurrentIndex(self.source.count() - 1)
+        else:
+            log.info("source %r not available here; keeping the default", text)
+
     def _source_changed(self, i):
+        if i < 0:
+            return
         text = self.source.itemText(i)
         log.info("source: %s", text)
         if self.video is not None:
@@ -639,8 +652,7 @@ def main():
     app = QApplication(sys.argv)
     w = Live(a.program_dir, a.mode)
     if a.video:
-        w.source.addItem(Path(a.video).name, str(Path(a.video).resolve()))
-        w.source.setCurrentIndex(w.source.count() - 1)
+        w.select_source(Path(a.video).name, str(Path(a.video).resolve()))
     w.show()
     sys.exit(app.exec())
 
