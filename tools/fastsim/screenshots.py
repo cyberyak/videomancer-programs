@@ -39,7 +39,7 @@ def grab(w) -> Image.Image:
 
 
 def window(prog: Path, source: str, values: dict, lfos: dict):
-    w = live.Live(prog, 4)
+    w = live.Live(prog, "÷4 fast")
     w.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
     w.timer.stop()
     w.show()

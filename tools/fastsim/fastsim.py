@@ -128,13 +128,53 @@ def _run(cmd, cwd, name):
         raise RuntimeError(f"{name} failed:\n{tail}")
 
 
+# Real raster totals for progressive standards (CEA-861):
+# (pixels per line, lines per frame, hsync clocks, vsync lines). The default
+# compact raster (SDK tester: +64 clocks, +8 lines) is far shorter, which
+# breaks programs that use the blanking time (e.g. czartroniks/bishop draws
+# during the previous line) or size things from the video timing ID.
+REAL_TIMING = {
+    "480p": (858, 525, 62, 6),
+    "576p": (864, 625, 64, 5),
+    "720p60": (1650, 750, 40, 5), "720p5994": (1650, 750, 40, 5),
+    "720p50": (1980, 750, 40, 5),
+    "1080p30": (2200, 1125, 44, 5), "1080p2997": (2200, 1125, 44, 5),
+    "1080p25": (2640, 1125, 44, 5),
+    "1080p24": (2750, 1125, 44, 5), "1080p2398": (2750, 1125, 44, 5),
+}
+
+
+def timing_args(video_mode: str, real_timing: bool) -> list[str]:
+    """Harness arguments for a real raster (full resolution only)."""
+    if not real_timing:
+        return []
+    if video_mode not in REAL_TIMING:
+        raise ValueError(f"no real timing for {video_mode}; choose one of {sorted(REAL_TIMING)}")
+    h_total, v_total, hsync, vsync = REAL_TIMING[video_mode]
+    vs = resolve_video_settings(video_mode, 1)
+    return ["--timing", str(h_total - vs.sim_width), str(v_total - vs.sim_height),
+            str(hsync), str(vsync)]
+
+
+def uses_timing_id(program_dir: Path) -> bool:
+    """Does the program read the video timing ID (registers_in(8))?"""
+    return any("registers_in(8)" in p.read_text(errors="ignore")
+               for p in Path(program_dir).glob("*.vhd"))
+
+
 def simulate(program_dir: Path, image: Image.Image, values: dict[str, int],
              video_mode: str = "1080p2997", decimation: int = 4,
              warmup_frames: int = SIM_WARMUP_FRAMES, capture_frames: int = 1,
-             log=print) -> list[Image.Image]:
-    """Run the program on *image*; return one RGB image per captured frame."""
+             log=print, real_timing: bool = False) -> list[Image.Image]:
+    """Run the program on *image*; return one RGB image per captured frame.
+
+    real_timing: feed the standard's true resolution and blanking
+    (decimation is ignored), as the device would see it.
+    """
     program_dir = program_dir.resolve()
     program = load_program(program_dir.name, program_dir.parent)
+    if real_timing:
+        decimation = 1
     vs = resolve_video_settings(video_mode, decimation)
     exe = build(program_dir, vs.fpga_config, log)
 
@@ -148,7 +188,8 @@ def simulate(program_dir: Path, image: Image.Image, values: dict[str, int],
     yuv.astype("<u2").tofile(inp)
     r = subprocess.run([str(exe), str(inp), str(outp), str(w), str(h),
                         str(int(vs.is_interlaced)), str(warmup_frames), str(capture_frames),
-                        ",".join(str(v) for v in regs)], capture_output=True, text=True)
+                        ",".join(str(v) for v in regs), *timing_args(video_mode, real_timing)],
+                       capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"simulator failed: {r.stderr.strip()}")
     log(r.stderr.strip())
@@ -168,6 +209,8 @@ def main() -> int:
     s.add_argument("--decimation", type=int, default=4)
     s.add_argument("--warmup-frames", type=int, default=SIM_WARMUP_FRAMES)
     s.add_argument("--capture-frames", type=int, default=1)
+    s.add_argument("--real-timing", action="store_true",
+                   help="true resolution and blanking of --video-mode (e.g. 480p)")
     s.add_argument("--fps", type=float, default=12, help="GIF playback rate")
     s.add_argument("--output", type=Path)
     a = ap.parse_args()
@@ -176,7 +219,7 @@ def main() -> int:
     program = load_program(prog_dir.name, prog_dir.parent)
     values = _load_registers(program, a.set, None, a.preset)
     frames = simulate(prog_dir, Image.open(a.image), values, a.video_mode, a.decimation,
-                      a.warmup_frames, a.capture_frames)
+                      a.warmup_frames, a.capture_frames, real_timing=a.real_timing)
     out = a.output or Path(f"{prog_dir.name}_fast.{'gif' if len(frames) > 1 else 'png'}")
     if out.suffix.lower() == ".gif":
         frames[0].save(out, save_all=True, append_images=frames[1:],

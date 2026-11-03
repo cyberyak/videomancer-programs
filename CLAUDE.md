@@ -34,7 +34,11 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
     don't trust fastsim alone for those programs yet.
 - fastsim reuses private helpers from the SDK tester (`_ordered_sdk_sources`, `_load_registers`).
   Recheck them after updating the SDK submodule.
-- `tools/fastsim/live.py [dir] [--video F]`: live window, ~28 fps at ÷4, Program picker (all 136), knobs plus per-knob LFOs.
+- `tools/fastsim/live.py [dir] [--mode M] [--video F]`: live window, ~28 fps at ÷4, Program picker (all 136),
+  Resolution menu, knobs plus per-knob LFOs.
+  - 93 programs read the timing ID (`registers_in(8)`): they need real timing (`--real-timing`,
+    "480p real"), which live picks automatically. The compact raster (SDK tester default) mis-scales them,
+    and Bishop renders black. See `docs/fastsim-compat.md`.
   - Sources: moving circles, images, video files (OpenCV, played on the 59.94 Hz device clock), camera.
   - Errors are logged to `build/live.log`, never fatal; the simulator process logs to `build/live_harness.log`.
   - Read those logs first when the user reports a crash.

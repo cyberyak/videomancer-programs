@@ -17,6 +17,7 @@
 //
 // Usage: harness IN.raw OUT.raw W H INTERLACED WARMUP CAPTURE REGS
 //        harness --serve W H [--rgb M0..M8]   (see serve() below)
+//        either form also takes --timing HB VB HS VS
 //   IN.raw   W*H*3 uint16 (Y,U,V per pixel, row-major), 10-bit values
 //   OUT.raw  CAPTURE*W*H*3 uint16 in the same layout (fields weaved)
 //   REGS     32 comma-separated register values (0-1023)
@@ -30,7 +31,11 @@
 #include <cstring>
 #include <vector>
 
-static const int H_BLANK = 64, V_BLANK = 8, HSYNC_CLKS = 8, VSYNC_LINES = 3, DRAIN_LINES = 32;
+// Raster geometry. The defaults match the SDK image tester's compact raster;
+// --timing HB VB HS VS gives a real video standard's blanking (e.g. 480p:
+// 138 45 62 6) for programs that need real line lengths.
+static int H_BLANK = 64, V_BLANK = 8, HSYNC_CLKS = 8, VSYNC_LINES = 3;
+static const int DRAIN_LINES = 32;
 
 struct Sim {
     Vvm_fastsim_top top;
@@ -172,6 +177,16 @@ static int serve(int w, int h, const double *inv) {
 }
 
 int main(int argc, char **argv) {
+    // Strip an optional "--timing HB VB HS VS" from anywhere in the arguments
+    for (int i = 1; i + 4 < argc; i++) {
+        if (strcmp(argv[i], "--timing") == 0) {
+            H_BLANK = atoi(argv[i + 1]); V_BLANK = atoi(argv[i + 2]);
+            HSYNC_CLKS = atoi(argv[i + 3]); VSYNC_LINES = atoi(argv[i + 4]);
+            for (int j = i; j + 5 < argc; j++) argv[j] = argv[j + 5];
+            argc -= 5;
+            break;
+        }
+    }
     if (argc >= 4 && strcmp(argv[1], "--serve") == 0) {
         if (argc == 4) return serve(atoi(argv[2]), atoi(argv[3]), nullptr);
         if (argc == 14 && strcmp(argv[4], "--rgb") == 0) {

@@ -14,8 +14,29 @@ at ÷4 on `test-images/shapes.png`, four programs at a time. Results go to
   interpreted as YUV.
 - **Build** (one-off per program, cached): median 9.9 s, max 46 s.
 - **Run**, 3 frames at 480×270: median 0.42 s, max 3.5 s (czartroniks/pulp).
+- The sweep uses the compact raster, so for programs that read the timing ID,
+  "ok" only means they build and run; see below.
 - The sweep only shows a program builds and produces frames. Pixel accuracy
   against GHDL is in the table below; extending it to every program is VM-2.
+
+## Compact raster vs real timing
+
+The SDK tester, and by default fastsim, feeds a **compact raster**: the
+decimated picture, for example 480×270 at ÷4, plus only 64 clocks and 8 lines
+of blanking, while still reporting a 1080p timing ID. That suits programs that
+work purely on the pixels they see, like Kaleido, which measures the frame. But
+**93 of the 136 programs read the timing ID** (`registers_in(8)`), mostly
+community programs that scale their graphics to the real resolution. In the
+compact raster they draw at the wrong scale, or off-screen. Programs that also
+work during blanking can draw nothing at all: czartroniks/bishop rasterizes its
+wireframe during the previous line and needs about 1,950 of a real HD line's
+2,200 clocks, so both GHDL and fastsim render it black.
+
+`fastsim.py simulate --video-mode 480p --real-timing` (and the live window's
+"480p/720p/1080p real" modes) feed the standard's true resolution and CEA-861
+blanking instead. The live window picks "480p real" automatically for programs
+that read the timing ID. Bishop draws correctly at 480p and 720p. There is no GHDL
+reference for real timing, because the SDK tester only supports the compact raster.
 
 ## Pixel comparison with GHDL
 

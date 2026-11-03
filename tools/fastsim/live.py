@@ -22,7 +22,13 @@ none) that offsets the knob each frame. LFO time advances per simulated
 frame at 59.94 fps, so modulation matches the device frame-for-frame; the
 window itself runs slower than real time.
 
-  python3 tools/fastsim/live.py [program_dir] [--decimation 4] [--video FILE]
+  python3 tools/fastsim/live.py [program_dir] [--mode "480p real"] [--video FILE]
+
+Resolution modes: "÷4 fast" and "÷2" use the SDK tester's compact 1080p
+raster (fast; fine for most programs). "480p/720p/1080p real" feed the
+standard's true resolution and blanking, needed by programs that size things
+from the video timing ID or work during blanking (e.g. czartroniks/bishop).
+Programs that read the timing ID start in "480p real" automatically.
 
 The Program menu switches between every program in the workspace (ours, the
 SDK examples, the community library); each builds once (~4-10 s), then is
@@ -62,6 +68,20 @@ from vhdl_image_tester.core.image_converter import _M_YUV_TO_RGB, prepare_image 
 
 CIRCLES = "Moving circles"
 DEFAULT_PROGRAM = fastsim.ROOT / "programs/cyberyak/kaleido"
+# name -> (video mode, decimation, real timing)
+MODES = {
+    "÷4 fast": ("1080p2997", 4, False),
+    "÷2": ("1080p2997", 2, False),
+    "480p real": ("480p", 1, True),
+    "720p real": ("720p60", 1, True),
+    "1080p real": ("1080p2997", 1, True),
+}
+
+
+def auto_mode(prog_dir: Path) -> str:
+    return "480p real" if fastsim.uses_timing_id(prog_dir) else "÷4 fast"
+
+
 _windows: list = []                     # keep switched-to windows alive
 
 
@@ -248,25 +268,27 @@ class Circles:
 
 
 class Live(QWidget):
-    def __init__(self, prog_dir: Path, decimation: int):
+    def __init__(self, prog_dir: Path, mode: str | None = None):
         super().__init__()
         self.prog_dir = prog_dir.resolve()
-        self.decimation = decimation
+        self.mode = mode or auto_mode(self.prog_dir)
+        video_mode, decimation, self.real_timing = MODES[self.mode]
         self._opened: str | None = None     # file chosen with "Open image/video…"
         self.program = fastsim.load_program(self.prog_dir.name, self.prog_dir.parent)
-        self.vs = resolve_video_settings("1080p2997", decimation)
+        self.vs = resolve_video_settings(video_mode, decimation)
         if self.vs.is_interlaced:
             raise SystemExit("live preview supports progressive modes only")
         self.w, self.h = self.vs.sim_width, self.vs.sim_height
         exe = fastsim.build(self.prog_dir, self.vs.fpga_config)
-        log.info("program %s, %dx%d (%s), simulator %s", self.prog_dir, self.w, self.h,
-                 self.vs.fpga_config, exe)
+        log.info("program %s, %s %dx%d (%s), simulator %s", self.prog_dir, self.mode,
+                 self.w, self.h, self.vs.fpga_config, exe)
         self._harness_err = open(HARNESS_LOG, "ab")
         # RGB in and out: the simulator converts with the SDK tester's BT.601
         # maths (inverse matrix passed as exact doubles), saving ~10 ms of
         # Python per frame.
         self.proc = subprocess.Popen([str(exe), "--serve", str(self.w), str(self.h), "--rgb",
-                                      *(repr(float(c)) for c in _M_YUV_TO_RGB.flatten())],
+                                      *(repr(float(c)) for c in _M_YUV_TO_RGB.flatten()),
+                                      *fastsim.timing_args(video_mode, self.real_timing)],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=self._harness_err)
         self.inflight: Image.Image | None = None    # input of the frame being simulated
@@ -293,7 +315,8 @@ class Live(QWidget):
 
         view = QVBoxLayout()
         self.out_lbl = QLabel()
-        self.out_lbl.setFixedSize(960, 540)
+        # SD standards are 4:3 on screen (non-square pixels)
+        self.out_lbl.setFixedSize(720 if self.w == 720 else 960, 540)
         self.out_lbl.setScaledContents(True)
         self.in_lbl = QLabel()
         self.in_lbl.setFixedSize(320, 180)
@@ -318,6 +341,15 @@ class Live(QWidget):
         self.program_box.currentIndexChanged.connect(self._switch_program)
         ctl.addWidget(QLabel("<b>Program</b>"), r, 0)
         ctl.addWidget(self.program_box, r, 1, 1, 2)
+        r += 1
+        self.mode_box = QComboBox()
+        self.mode_box.addItems(list(MODES))
+        self.mode_box.setCurrentText(self.mode)
+        self.mode_box.setToolTip("÷4/÷2: compact raster, fast. 'real': the standard's true resolution\n"
+                                 "and blanking, for programs that use the timing ID or blanking time.")
+        self.mode_box.currentIndexChanged.connect(self._switch_mode)
+        ctl.addWidget(QLabel("Resolution"), r, 0)
+        ctl.addWidget(self.mode_box, r, 1, 1, 2)
         r += 1
         self.source = QComboBox()
         self.source.addItem(CIRCLES)
@@ -408,23 +440,35 @@ class Live(QWidget):
 
     def _switch_program(self, i):
         target = Path(self.program_box.itemData(i))
-        if target.resolve() == self.prog_dir:
-            return
-        log.info("switching to %s", target)
+        if target.resolve() != self.prog_dir:
+            self._reopen(target, None)          # new program: automatic mode
+
+    def _switch_mode(self, i):
+        mode = self.mode_box.itemText(i)
+        if mode != self.mode:
+            self._reopen(self.prog_dir, mode)
+
+    def _reopen(self, target: Path, mode: str | None):
+        """Replace this window with one for (target, mode), keeping the source."""
+        log.info("opening %s (%s)", target, mode or "auto")
         self.timer.stop()
         self.status.setText(f"building {target.name}… (first time only)")
         QApplication.processEvents()
         try:
-            new = Live(target, self.decimation)
+            new = Live(target, mode)
         except BaseException as e:      # build errors, SystemExit for interlaced
             log.exception("could not open %s", target)
             QMessageBox.critical(self, "Program failed to load",
                                  f"{target.name}: {e}\n\nDetails in {LOG}")
-            self.program_box.blockSignals(True)
-            self.program_box.setCurrentIndex(next(
-                j for j in range(self.program_box.count())
-                if Path(self.program_box.itemData(j)).resolve() == self.prog_dir))
-            self.program_box.blockSignals(False)
+            for box, current in ((self.program_box, None), (self.mode_box, self.mode)):
+                box.blockSignals(True)
+                if current is None:
+                    box.setCurrentIndex(next(
+                        j for j in range(box.count())
+                        if Path(box.itemData(j)).resolve() == self.prog_dir))
+                else:
+                    box.setCurrentText(current)
+                box.blockSignals(False)
             self.timer.start(0)
             return
         new.move(self.pos())
@@ -545,7 +589,7 @@ class Live(QWidget):
         now = time.time()
         if now - self.t_last >= 1:
             self.status.setText(f"{self.frames / (now - self.t_last):.1f} fps  "
-                                f"{self.w}x{self.h} (÷{1920 // self.w})")
+                                f"{self.w}x{self.h} ({self.mode})")
             self.frames, self.t_last = 0, now
 
     def closeEvent(self, e):
@@ -587,13 +631,13 @@ def _setup_logging():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("program_dir", type=Path, nargs="?", default=DEFAULT_PROGRAM)
-    ap.add_argument("--decimation", type=int, default=4, choices=[2, 4, 8])
+    ap.add_argument("--mode", choices=list(MODES), help="resolution mode (default: automatic)")
     ap.add_argument("--video", help="start with this video file as the source")
     a = ap.parse_args()
     _setup_logging()
     log.info("---- live preview start ----")
     app = QApplication(sys.argv)
-    w = Live(a.program_dir, a.decimation)
+    w = Live(a.program_dir, a.mode)
     if a.video:
         w.source.addItem(Path(a.video).name, str(Path(a.video).resolve()))
         w.source.setCurrentIndex(w.source.count() - 1)

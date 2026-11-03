@@ -18,3 +18,10 @@ paths:
 - The C++ BT.601 conversion in `harness.cpp` must stay bit-identical to the SDK tester's
   `image_converter.py`. It was verified at 0 differing pixels over 40 frames; recheck after
   touching it or the compiler flags (FMA contraction could change the rounding).
+
+# Raster modes
+
+- The default compact raster (SDK tester: +64 clocks, +8 lines, decimated picture, 1080p timing ID) is only
+  right for programs that ignore the timing ID and the blanking time.
+- `--real-timing` / "480p real" feeds CEA-861 totals (480p: 858×525, ~6 fps live).
+- For a black or oddly scaled program, check `fastsim.uses_timing_id()` before suspecting fastsim.

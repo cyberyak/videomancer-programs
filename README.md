@@ -53,6 +53,10 @@ with a program the way you would on the device.
 Here czartroniks' Feedback runs on the moving-circles source.*
 
 - **Program picker:** every program in the workspace. All 133 YUV-core programs build and run.
+- **Resolution menu:**
+  - Fast compact modes (÷4, ÷2).
+  - **Real-timing** 480p, 720p and 1080p, with the standard's true resolution and blanking.
+  - The 93 programs that size their graphics from the video standard open in 480p real automatically.
 - **Controls:** knobs, switches and the fader, labelled from each program's TOML.
 - **LFO per knob:** sine, triangle, saw, square or sample-and-hold, with a rate in Hz and
   a bipolar depth. It runs on the device's 59.94 Hz frame clock.
