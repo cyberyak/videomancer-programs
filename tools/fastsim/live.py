@@ -277,6 +277,8 @@ class Live(QWidget):
         self.values: dict[str, int] = {}
         self.lfos: dict[str, LFO] = {}
         self.readouts: dict[str, QLabel] = {}
+        self.controls: dict[str, QWidget] = {}          # slider or checkbox per parameter
+        self.lfo_widgets: dict[str, tuple] = {}         # (shape, rate, depth) per knob
         self.sim_frame = 0
         self.frames, self.t_last = 0, time.time()
         self._build_ui()
@@ -345,6 +347,7 @@ class Live(QWidget):
                 box = QCheckBox(f"{p.name_label}: {labels[0]} / {labels[1]}")
                 box.setChecked(p.initial_toggle_state)
                 box.toggled.connect(lambda on, pid=p.parameter_id: self._set(pid, int(on)))
+                self.controls[p.parameter_id] = box
                 self.values[p.parameter_id] = int(p.initial_toggle_state)
                 ctl.addWidget(box, r, 0, 1, 2)
             else:
@@ -353,6 +356,7 @@ class Live(QWidget):
                 s.setRange(0, 1023)
                 s.setValue(p.initial_pot_value)
                 s.valueChanged.connect(lambda v, pid=pid: self._set(pid, v))
+                self.controls[pid] = s
                 self.values[pid] = p.initial_pot_value
                 readout = QLabel(str(p.initial_pot_value))
                 readout.setFixedWidth(36)
@@ -378,6 +382,7 @@ class Live(QWidget):
                 depth.setValue(0)
                 depth.setToolTip("LFO depth, -100..100 % (centre = none)")
                 depth.valueChanged.connect(lambda v, l=lfo: setattr(l, "depth", v / 100))
+                self.lfo_widgets[pid] = (shape, rate, depth)
                 row = QHBoxLayout()
                 row.addWidget(QLabel("  LFO"))
                 row.addWidget(shape)
@@ -388,7 +393,6 @@ class Live(QWidget):
         reset = QPushButton("All LFOs off")
         reset.clicked.connect(self._lfos_off)
         ctl.addWidget(reset, r, 0, 1, 3)
-        self._shape_boxes = [w for w in self.findChildren(QComboBox) if w is not self.source]
         r += 1
         ctl.setRowStretch(r, 1)
         side = QWidget()
@@ -437,8 +441,8 @@ class Live(QWidget):
             new.source.setCurrentIndex(idx)
 
     def _lfos_off(self):
-        for box in self._shape_boxes:
-            box.setCurrentText("Off")
+        for shape, _, _ in self.lfo_widgets.values():
+            shape.setCurrentText("Off")
         for lfo in self.lfos.values():
             lfo.shape = "Off"
 
