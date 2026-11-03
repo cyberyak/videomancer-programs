@@ -127,15 +127,32 @@ class VideoSource:
             return self.last
         want = int(t * self.fps) % self.count if self.count > 0 else int(t * self.fps)
         if want < self.pos or self.last is None:          # looped or first frame
-            self.cap.set(self.cv2.CAP_PROP_POS_FRAMES, 0)
-            self.pos = -1
+            self._rewind()
         while self.pos < want:                            # skip ahead
-            if self.pos < want - 1:
-                self.cap.grab()
-            else:
-                self.last = self._read()
+            ok = self.cap.grab()
+            if ok and self.pos == want - 1:
+                ok, bgr = self.cap.retrieve()
+                if ok:
+                    rgb = self.cv2.cvtColor(bgr, self.cv2.COLOR_BGR2RGB)
+                    self.last = prepare_image(Image.fromarray(rgb), self.w, self.h)
+            if not ok:
+                # Container metadata often overstates the length (screen
+                # recordings are variable frame rate): learn the real length
+                # and loop instead of failing.
+                if self.pos < 0:
+                    raise RuntimeError("video has no decodable frames")
+                log.info("video ends at frame %d (metadata said %d); looping",
+                         self.pos + 1, self.count)
+                self.count = self.pos + 1
+                want %= self.count
+                self._rewind()
+                continue
             self.pos += 1
         return self.last
+
+    def _rewind(self):
+        self.cap.set(self.cv2.CAP_PROP_POS_FRAMES, 0)
+        self.pos = -1
 
     def close(self):
         self.cap.release()
