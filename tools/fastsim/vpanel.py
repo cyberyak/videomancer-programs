@@ -124,9 +124,16 @@ class VPanel(QWidget):
             return (lfo.depth + 1) / 2
         return SHAPES.index(lfo.shape) / (len(SHAPES) - 1)
 
-    def _set_lfo_from(self, which: str, v: float):
+    def apply_lfo_control(self, which: str, v: float):
+        """Time/Space/Slope from MIDI: same as turning the panel knob."""
+        self._set_lfo_from(which, v, touched=False)
+
+    def _set_lfo_from(self, which: str, v: float, touched: bool = True):
         v = min(1.0, max(0.0, v))
         pid = self.sel
+        if touched:
+            self.live.last_target = {"time": "lfo_rate:sel", "space": f"lfo_depth:{pid}",
+                                     "slope": "lfo_shape:sel"}[which]
         if pid not in self.live.lfos:
             return
         name = self.param(pid).name_label if self.param(pid) else pid

@@ -65,6 +65,9 @@ Here czartroniks' Feedback runs on the moving-circles source.*
   - Still images
   - Video files, played frame-accurately on the device clock and looping
   - Any camera, including virtual cameras from VS2 or OBS
+  - Syphon and NDI streams from other apps
+- **Virtual front panel:** laid out like the Videomancer.
+- **MIDI:** learn mode for any controller, plus a Faderfox UC4 preset.
 - **Stable:** errors are logged to `build/live.log` instead of closing the window.
 
 It simulates what the FPGA does clock by clock, so output matches the hardware logic,
@@ -83,7 +86,7 @@ cd videomancer-programs
 mkdir -p videomancer-sdk/build && cd videomancer-sdk/build
 curl -L -o oss.tgz https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2025-05-23/oss-cad-suite-darwin-arm64-20250523.tgz
 tar -zxf oss.tgz && rm oss.tgz && cd ../..
-source tools/env.sh && python3 -m pip install pillow numpy PyQt6 jsonschema opencv-python-headless
+source tools/env.sh && python3 -m pip install pillow numpy PyQt6 jsonschema opencv-python-headless mido python-rtmidi syphon-python cyndilib
 
 # Open the live simulator
 python3 tools/fastsim/live.py

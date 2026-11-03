@@ -15,6 +15,7 @@ Sources:
                   frame, like HDMI input) and loops
   Camera          a webcam, or a virtual camera that VS2/OBS can feed
                   (macOS asks for camera permission the first time)
+  Syphon… / NDI…  live video from another app; pick a source when asked
 
 LFOs: every knob and the fader has an LFO (sine, triangle, saw, square,
 sample & hold) with a rate in Hz and a bipolar depth (attenuverter, centre =
@@ -54,15 +55,16 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtCore import QRectF, QSettings, Qt, QTimer
+from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 from PyQt6.QtMultimedia import QMediaDevices
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-                             QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QSlider,
-                             QTabWidget, QVBoxLayout, QWidget)
+                             QGridLayout, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton, QScrollArea, QSlider,
+                             QSizePolicy, QTabWidget, QVBoxLayout, QWidget)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fastsim  # noqa: E402
+from midi import MidiIn, describe, key_of  # noqa: E402
 from vpanel import VPanel  # noqa: E402
 import vpanel  # noqa: E402
 
@@ -237,6 +239,100 @@ class VideoSource:
         self.cap.release()
 
 
+class SyphonSource:
+    """A Syphon server on this Mac (VS2, Resolume, VDMX, ...)."""
+
+    directory = None                    # kept alive: it tracks servers appearing
+
+    @classmethod
+    def servers(cls) -> list:
+        from syphon import SyphonServerDirectory
+        if cls.directory is None:
+            cls.directory = SyphonServerDirectory()
+        for _ in range(20):             # announcements arrive on the event loop
+            QApplication.processEvents()
+            time.sleep(0.05)
+        return list(cls.directory.servers)
+
+    @staticmethod
+    def label(server) -> str:
+        return " - ".join(x for x in (server.app_name, server.name) if x)
+
+    def __init__(self, label: str, w: int, h: int):
+        from syphon import SyphonMetalClient
+        from syphon.utils.numpy import copy_mtl_texture_to_image
+        self.copy = copy_mtl_texture_to_image
+        self.w, self.h = w, h
+        server = next((x for x in self.servers() if self.label(x) == label), None)
+        if server is None:
+            raise RuntimeError(f"Syphon server not found: {label}. Is the app running?")
+        self.client = SyphonMetalClient(server)
+        self.last = Image.new("RGB", (w, h))
+        log.info("syphon %s", label)
+
+    def frame(self, t: float) -> Image.Image:
+        if self.client.has_new_frame:
+            bgra = self.copy(self.client.new_frame_image)
+            self.last = prepare_image(Image.fromarray(bgra[..., [2, 1, 0]]), self.w, self.h)
+        return self.last
+
+    def close(self):
+        self.client.stop()
+
+
+class NDISource:
+    """An NDI source on the network or this Mac."""
+
+    @staticmethod
+    def names() -> list[str]:
+        from cyndilib.finder import Finder
+        f = Finder()
+        f.open()
+        for _ in range(4):              # discovery takes a moment
+            f.wait_for_sources(0.5)
+            QApplication.processEvents()
+        names = list(f.get_source_names())
+        f.close()
+        return names
+
+    def __init__(self, name: str, w: int, h: int):
+        from cyndilib.finder import Finder
+        from cyndilib.receiver import Receiver
+        from cyndilib.video_frame import VideoFrameSync
+        from cyndilib.wrapper import RecvBandwidth, RecvColorFormat
+        self.w, self.h = w, h
+        self.finder = Finder()
+        self.finder.open()
+        src = None
+        for _ in range(10):
+            self.finder.wait_for_sources(0.3)
+            if name in self.finder.get_source_names():
+                src = self.finder.get_source(name)
+                break
+        if src is None:
+            self.finder.close()
+            raise RuntimeError(f"NDI source not found: {name}")
+        self.vf = VideoFrameSync()
+        self.rx = Receiver(color_format=RecvColorFormat.RGBX_RGBA, bandwidth=RecvBandwidth.highest)
+        self.rx.frame_sync.set_video_frame(self.vf)
+        self.rx.set_source(src)
+        self.last = Image.new("RGB", (w, h))
+        log.info("ndi %s", name)
+
+    def frame(self, t: float) -> Image.Image:
+        self.rx.frame_sync.capture_video()
+        if self.vf.xres:
+            a = np.asarray(self.vf.get_array())
+            if a.size == self.vf.xres * self.vf.yres * 4:
+                rgba = a.reshape(self.vf.yres, self.vf.xres, 4)
+                self.last = prepare_image(Image.fromarray(rgba[..., :3].copy()), self.w, self.h)
+        return self.last
+
+    def close(self):
+        self.rx.disconnect()
+        self.finder.close()
+
+
 class Circles:
     """Bouncing, overlapping circles over a slow gradient."""
 
@@ -312,11 +408,21 @@ class Live(QWidget):
         self.sim_frame = 0
         self.shown_values: dict[str, int] = {}          # values after LFOs (panel LEDs)
         self.modulation_enabled = True                  # panel MOTION button
+        self.last_target: str | None = None             # last control touched (MIDI learn)
+        self.learning = False
+        try:
+            self.midi = MidiIn()
+        except Exception:                               # mido/rtmidi missing
+            log.exception("MIDI unavailable")
+            self.midi = None
         self.frames, self.t_last = 0, time.time()
         self._build_ui()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(0)
+        self.midi_timer = QTimer(self)                  # MIDI works while paused too
+        self.midi_timer.timeout.connect(self._midi_poll)
+        self.midi_timer.start(10)
 
     # -- UI -----------------------------------------------------------------
     def _build_ui(self):
@@ -324,10 +430,9 @@ class Live(QWidget):
         root = QHBoxLayout(self)
 
         view = QVBoxLayout()
-        self.out_lbl = QLabel()
-        # SD standards are 4:3 on screen (non-square pixels)
-        self.out_lbl.setFixedSize(576 if self.w == 720 else 768, 432)
-        self.out_lbl.setScaledContents(True)
+        # Grows with the window, keeping the picture's display aspect
+        # (SD standards are 4:3 on screen: non-square pixels)
+        self.out_lbl = AspectView(4 / 3 if self.w == 720 else 16 / 9)
         self.in_lbl = QLabel()
         self.in_lbl.setFixedSize(320, 180)
         self.in_lbl.setScaledContents(True)
@@ -378,6 +483,8 @@ class Live(QWidget):
             self.source.addItem(p.name, str(p))
         self.source.addItem("Open image…")
         self.source.addItem("Open video…")
+        self.source.addItem("Syphon…")
+        self.source.addItem("NDI…")
         # Cameras that exist, by name. OpenCV's AVFoundation backend numbers
         # devices in the same discovery order as Qt's list.
         for cam, dev in enumerate(QMediaDevices.videoInputs()):
@@ -389,6 +496,32 @@ class Live(QWidget):
         self.play = QPushButton("Pause")
         self.play.clicked.connect(self._toggle_play)
         head.addWidget(self.play, r, 0, 1, 2)
+        r += 1
+        # MIDI: input port, learn mode, presets
+        midi_row = QHBoxLayout()
+        self.midi_box = QComboBox()
+        self.midi_box.addItem("(no MIDI)", "")
+        for name in (self.midi.ports() if self.midi else []):
+            self.midi_box.addItem(name, name)
+        self.midi_box.currentIndexChanged.connect(lambda i: self.open_midi(self.midi_box.itemData(i)))
+        self.learn_btn = QPushButton("Learn")
+        self.learn_btn.setCheckable(True)
+        self.learn_btn.setToolTip("Touch a control on the panel or in Controls, then move a\n"
+                                  "knob/fader/button on your MIDI controller to bind it.\n"
+                                  "Stays on for more bindings; click again to finish.")
+        self.learn_btn.toggled.connect(self._set_learning)
+        preset = QPushButton("UC4 preset")
+        preset.setToolTip("Faderfox UC4, factory Setup 1 (assumed CCs: encoders 8-15, faders 32-39):\n"
+                          "encoders 1-6 = knobs 1-6, 7 = LFO rate, 8 = LFO shape (selected knob);\n"
+                          "faders 1-6 = LFO depth of knobs 1-6, 7 = fader LFO depth, 8 = fader.\n"
+                          "If something doesn't respond, fix it with Learn.")
+        preset.clicked.connect(lambda: self._midi_preset("Faderfox UC4 (Setup 1)"))
+        clear = QPushButton("Clear")
+        clear.clicked.connect(self._midi_clear)
+        for wdg in (self.midi_box, self.learn_btn, preset, clear):
+            midi_row.addWidget(wdg)
+        head.addWidget(QLabel("MIDI"), r, 0)
+        head.addLayout(midi_row, r, 1, 1, 2)
         r += 1
 
         ctl = QGridLayout()
@@ -469,6 +602,93 @@ class Live(QWidget):
 
     def _set(self, pid, v):
         self.values[pid] = v
+        self.last_target = pid
+
+    # -- MIDI ------------------------------------------------------------------
+    def open_midi(self, name: str):
+        if self.midi is None:
+            return
+        try:
+            self.midi.open(name)
+        except Exception as e:
+            log.exception("cannot open MIDI port %r", name)
+            self.panel.say(f"MIDI: cannot open {name}")
+            return
+        QSettings("cyberyak", "fastsim-live").setValue("midi_port", name)
+        self.midi_box.blockSignals(True)
+        j = self.midi_box.findData(name)
+        if j < 0 and name:
+            self.midi_box.addItem(name, name)
+            j = self.midi_box.count() - 1
+        self.midi_box.setCurrentIndex(max(j, 0))
+        self.midi_box.blockSignals(False)
+        if name:
+            self.panel.say(f"MIDI: {name} ({len(self.midi.mapping)} mappings)")
+
+    def _set_learning(self, on: bool):
+        self.learning = on
+        self.panel.say("Learn: touch a control, then move a MIDI control" if on else "Learn off")
+
+    def _midi_preset(self, name: str):
+        if self.midi is None or not self.midi.name:
+            self.panel.say("Pick a MIDI input first")
+            return
+        self.midi.apply_preset(name)
+        self.panel.say(f"{name}: {len(self.midi.mapping)} mappings")
+
+    def _midi_clear(self):
+        if self.midi is not None and self.midi.name:
+            self.midi.clear()
+            self.panel.say("MIDI mappings cleared")
+
+    def _midi_poll(self):
+        if self.midi is None or self.midi.port is None:
+            return
+        for msg in self.midi.poll():
+            key = key_of(msg)
+            if key is None:
+                continue
+            active = msg.type == "control_change" or (msg.type == "note_on" and msg.velocity > 0)
+            if self.learning and active:
+                if self.last_target is None:
+                    self.panel.say("Learn: touch a control first")
+                    continue
+                if self.midi.mapping.get(key) != self.last_target:
+                    self.midi.bind(key, self.last_target)
+                    self.panel.say(f"{describe(key)} -> {self._target_name(self.last_target)}")
+            target = self.midi.mapping.get(key)
+            if target and active:
+                self._midi_apply(target, msg)
+
+    def _target_name(self, target: str) -> str:
+        kind, _, pid = target.partition(":")
+        if kind == "lfo_rate":
+            return "selected LFO rate"
+        if kind == "lfo_shape":
+            return "selected LFO shape"
+        p = self.panel.param(pid if kind == "lfo_depth" else target)
+        name = p.name_label if p else (pid or target)
+        return f"{name} LFO depth" if kind == "lfo_depth" else name
+
+    def _midi_apply(self, target: str, msg):
+        v = msg.value if msg.type == "control_change" else msg.velocity
+        kind, _, rest = target.partition(":")
+        if kind == "lfo_depth":
+            depth = max(-1.0, min(1.0, (v - 64) / 63))
+            self.set_lfo(rest, depth=depth)
+            if self.lfos.get(rest) and self.lfos[rest].shape == "Off" and depth != 0:
+                self.set_lfo(rest, shape="Sine")
+        elif kind == "lfo_rate":
+            self.panel.apply_lfo_control("time", v / 127)
+        elif kind == "lfo_shape":
+            self.panel.apply_lfo_control("slope", v / 127)
+        elif target in self.values:
+            p = self.panel.param(target)
+            if p is not None and p.is_toggle:
+                on = (not self.values[target]) if msg.type == "note_on" else v >= 64
+                self.apply_value(target, int(on), touched=False)
+            else:
+                self.apply_value(target, round(v / 127 * 1023), touched=False)
 
     def _switch_program(self, i):
         target = Path(self.program_box.itemData(i))
@@ -503,19 +723,25 @@ class Live(QWidget):
                 box.blockSignals(False)
             self.timer.start(0)
             return
-        new.move(self.pos())
+        new.setGeometry(self.geometry())        # keep size and position
         new.show()
         _windows.append(new)
         text, data = self.source.currentText(), self.source.currentData()
         if text.startswith("Open"):
             text, data = (Path(self._opened).name, self._opened) if self._opened else ("", None)
-        self.close()                    # releases the camera / video first
+        port, learning = (self.midi.name if self.midi else ""), self.learning
+        self.close()                    # releases the camera / video / MIDI port first
         new.select_source(text, data)
+        new.open_midi(port)
+        new.learn_btn.setChecked(learning)
 
     # -- panel API --------------------------------------------------------------
-    def apply_value(self, pid: str, v: int):
-        """Set a parameter and move its classic widget to match."""
+    def apply_value(self, pid: str, v: int, touched: bool = True):
+        """Set a parameter and move its classic widget to match. touched=False
+        for MIDI-driven changes, which must not become the learn target."""
         self.values[pid] = v
+        if touched:
+            self.last_target = pid
         w = self.controls.get(pid)
         if w is not None:
             w.blockSignals(True)
@@ -574,6 +800,27 @@ class Live(QWidget):
         self.video = VideoSource(spec, self.w, self.h)
         self.video_start = self.sim_frame
 
+    def _pick_stream(self, kind: str):
+        """Discover Syphon/NDI sources, let the user pick, add it to the menu."""
+        self.status.setText(f"looking for {kind[:-1]} sources…")
+        QApplication.processEvents()
+        if kind == "Syphon…":
+            found = [SyphonSource.label(x) for x in SyphonSource.servers()]
+            prefix = "syphon:"
+        else:
+            found = NDISource.names()
+            prefix = "ndi:"
+        if not found:
+            QMessageBox.information(self, kind[:-1], f"No {kind[:-1]} sources found. "
+                                    "Start the sending app (and enable its output), then try again.")
+            self.source.setCurrentIndex(0)
+            return
+        name, ok = QInputDialog.getItem(self, kind[:-1], "Source:", found, 0, False)
+        if ok and name:
+            self.select_source(f"{kind[:-1]}: {name}", prefix + name)
+        else:
+            self.source.setCurrentIndex(0)
+
     def select_source(self, text: str, data) -> None:
         """Select a source by what it is (menu text + data), adding a file
         that isn't in this window's menu (e.g. one given with --video)."""
@@ -583,8 +830,9 @@ class Live(QWidget):
             if self.source.itemText(j) == text and self.source.itemData(j) == data:
                 self.source.setCurrentIndex(j)
                 return
-        if isinstance(data, str) and Path(data).exists():
-            self.source.addItem(Path(data).name, data)
+        if isinstance(data, str) and (data.startswith(("syphon:", "ndi:")) or Path(data).exists()):
+            label = text if data.startswith(("syphon:", "ndi:")) else Path(data).name
+            self.source.addItem(label, data)
             self.source.setCurrentIndex(self.source.count() - 1)
         else:
             log.info("source %r not available here; keeping the default", text)
@@ -603,6 +851,14 @@ class Live(QWidget):
             pass
         elif text.startswith("Camera: "):
             self._start_video(int(data))
+        elif text in ("Syphon…", "NDI…"):
+            self._pick_stream(text)
+        elif isinstance(data, str) and data.startswith("syphon:"):
+            self.video = SyphonSource(data[7:], self.w, self.h)
+            self.video_start = self.sim_frame
+        elif isinstance(data, str) and data.startswith("ndi:"):
+            self.video = NDISource(data[4:], self.w, self.h)
+            self.video_start = self.sim_frame
         elif text == "Open video…":
             path, _ = QFileDialog.getOpenFileName(
                 self, "Video", str(fastsim.ROOT),
@@ -685,11 +941,42 @@ class Live(QWidget):
             self.frames, self.t_last = 0, now
 
     def closeEvent(self, e):
+        QSettings("cyberyak", "fastsim-live").setValue("geometry", self.saveGeometry())
         self.timer.stop()
         self.proc.kill()
         if self.video is not None:
             self.video.close()
+        if self.midi is not None:
+            self.midi.close()
+        self.midi_timer.stop()
         super().closeEvent(e)
+
+
+class AspectView(QWidget):
+    """Shows a pixmap scaled to fit, letterboxed to a fixed display aspect."""
+
+    def __init__(self, aspect: float):
+        super().__init__()
+        self.aspect, self._pm = aspect, None
+        self.setMinimumSize(480, 270)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def setPixmap(self, pm: QPixmap):
+        self._pm = pm
+        self.update()
+
+    def pixmap(self) -> QPixmap | None:
+        return self._pm
+
+    def paintEvent(self, _):
+        qp = QPainter(self)
+        qp.fillRect(self.rect(), QColor(0, 0, 0))
+        if self._pm is None:
+            return
+        w = min(self.width(), self.height() * self.aspect)
+        h = w / self.aspect
+        qp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        qp.drawPixmap(QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h).toRect(), self._pm)
 
 
 def _pix(im: Image.Image) -> QPixmap:
@@ -730,6 +1017,13 @@ def main():
     log.info("---- live preview start ----")
     app = QApplication(sys.argv)
     w = Live(a.program_dir, a.mode)
+    settings = QSettings("cyberyak", "fastsim-live")
+    geom = settings.value("geometry")
+    if geom is not None:
+        w.restoreGeometry(geom)                 # size and place from last time
+    port = settings.value("midi_port") or ""
+    if port and w.midi and port in w.midi.ports():
+        w.open_midi(port)
     if a.video:
         w.select_source(Path(a.video).name, str(Path(a.video).resolve()))
     w.show()
