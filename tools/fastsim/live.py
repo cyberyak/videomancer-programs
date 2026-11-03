@@ -22,7 +22,11 @@ none) that offsets the knob each frame. LFO time advances per simulated
 frame at 59.94 fps, so modulation matches the device frame-for-frame; the
 window itself runs slower than real time.
 
-  python3 tools/fastsim/live.py <program_dir> [--decimation 4] [--video FILE]
+  python3 tools/fastsim/live.py [program_dir] [--decimation 4] [--video FILE]
+
+The Program menu switches between every program in the workspace (ours, the
+SDK examples, the community library); each builds once (~4-10 s), then is
+cached. Programs that failed tools/fastsim/sweep.py are marked with a warning.
 
 Errors never close the window: they are logged with a traceback to
 build/live.log and shown in a dialog. Native crashes (segfaults) are also
@@ -57,6 +61,30 @@ from vhdl_image_tester.core.config import ABI_REG_VIDEO_TIMING, resolve_video_se
 from vhdl_image_tester.core.image_converter import _M_YUV_TO_RGB, prepare_image  # noqa: E402
 
 CIRCLES = "Moving circles"
+DEFAULT_PROGRAM = fastsim.ROOT / "programs/cyberyak/kaleido"
+_windows: list = []                     # keep switched-to windows alive
+
+
+def program_list() -> list[tuple[str, Path]]:
+    """(label, dir) for every program: ours, SDK examples, community."""
+    ok = {}
+    results = fastsim.ROOT / "build/fastsim/sweep/results.json"
+    if results.exists():
+        import json
+        ok = {r["program"]: r["status"] == "ok" for r in json.loads(results.read_text())}
+    groups = [(sorted((fastsim.ROOT / "programs/cyberyak").iterdir()), "cyberyak"),
+              (sorted((fastsim.ROOT / "videomancer-sdk/programs").iterdir()), "lzx"),
+              (sorted((fastsim.ROOT / "videomancer-community-programs/programs").glob("*/*")), None)]
+    out = []
+    for dirs, vendor in groups:
+        for d in dirs:
+            if not (d / f"{d.name}.toml").exists():
+                continue
+            label = f"{vendor or d.parent.name}/{d.name}"
+            if ok.get(str(d.relative_to(fastsim.ROOT))) is False:
+                label = "⚠ " + label
+            out.append((label, d))
+    return out
 LOG = fastsim.ROOT / "build/live.log"
 HARNESS_LOG = fastsim.ROOT / "build/live_harness.log"
 log = logging.getLogger("live")
@@ -223,6 +251,8 @@ class Live(QWidget):
     def __init__(self, prog_dir: Path, decimation: int):
         super().__init__()
         self.prog_dir = prog_dir.resolve()
+        self.decimation = decimation
+        self._opened: str | None = None     # file chosen with "Open image/video…"
         self.program = fastsim.load_program(self.prog_dir.name, self.prog_dir.parent)
         self.vs = resolve_video_settings("1080p2997", decimation)
         if self.vs.is_interlaced:
@@ -277,6 +307,16 @@ class Live(QWidget):
 
         ctl = QGridLayout()
         r = 0
+        self.program_box = QComboBox()
+        self.program_box.setMaxVisibleItems(30)
+        for label, d in program_list():
+            self.program_box.addItem(label, str(d))
+            if d.resolve() == self.prog_dir:
+                self.program_box.setCurrentIndex(self.program_box.count() - 1)
+        self.program_box.currentIndexChanged.connect(self._switch_program)
+        ctl.addWidget(QLabel("<b>Program</b>"), r, 0)
+        ctl.addWidget(self.program_box, r, 1, 1, 2)
+        r += 1
         self.source = QComboBox()
         self.source.addItem(CIRCLES)
         for p in sorted((fastsim.ROOT / "test-images").glob("*.png")):
@@ -362,6 +402,40 @@ class Live(QWidget):
     def _set(self, pid, v):
         self.values[pid] = v
 
+    def _switch_program(self, i):
+        target = Path(self.program_box.itemData(i))
+        if target.resolve() == self.prog_dir:
+            return
+        log.info("switching to %s", target)
+        self.timer.stop()
+        self.status.setText(f"building {target.name}… (first time only)")
+        QApplication.processEvents()
+        try:
+            new = Live(target, self.decimation)
+        except BaseException as e:      # build errors, SystemExit for interlaced
+            log.exception("could not open %s", target)
+            QMessageBox.critical(self, "Program failed to load",
+                                 f"{target.name}: {e}\n\nDetails in {LOG}")
+            self.program_box.blockSignals(True)
+            self.program_box.setCurrentIndex(next(
+                j for j in range(self.program_box.count())
+                if Path(self.program_box.itemData(j)).resolve() == self.prog_dir))
+            self.program_box.blockSignals(False)
+            self.timer.start(0)
+            return
+        new.move(self.pos())
+        new.show()
+        _windows.append(new)
+        idx, text = self.source.currentIndex(), self.source.currentText()
+        opened = self._opened
+        self.close()                    # releases the camera / video first
+        # Carry the source over; a file picked with "Open…" is re-added by path
+        if text.startswith("Open") and opened:
+            new.source.addItem(Path(opened).name, opened)
+            new.source.setCurrentIndex(new.source.count() - 1)
+        elif not text.startswith("Open"):
+            new.source.setCurrentIndex(idx)
+
     def _lfos_off(self):
         for box in self._shape_boxes:
             box.setCurrentText("Off")
@@ -398,6 +472,7 @@ class Live(QWidget):
                 "Video (" + " ".join("*" + e for e in VIDEO_EXTS) + ")")
             if path:
                 self._start_video(path)
+                self._opened = path
         elif data and Path(data).suffix.lower() in VIDEO_EXTS:
             self._start_video(data)
         elif text == "Open image…":
@@ -405,6 +480,7 @@ class Live(QWidget):
                                                   "Images (*.png *.jpg *.jpeg *.bmp *.tif)")
             if path:
                 self.still = prepare_image(Image.open(path), self.w, self.h)
+                self._opened = path
         else:
             self.still = prepare_image(Image.open(self.source.itemData(i)), self.w, self.h)
 
@@ -506,7 +582,7 @@ def _setup_logging():
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("program_dir", type=Path)
+    ap.add_argument("program_dir", type=Path, nargs="?", default=DEFAULT_PROGRAM)
     ap.add_argument("--decimation", type=int, default=4, choices=[2, 4, 8])
     ap.add_argument("--video", help="start with this video file as the source")
     a = ap.parse_args()

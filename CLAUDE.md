@@ -34,10 +34,12 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
     don't trust fastsim alone for those programs yet.
 - fastsim reuses private helpers from the SDK tester (`_ordered_sdk_sources`, `_load_registers`).
   Recheck them after updating the SDK submodule.
-- `tools/fastsim/live.py <dir> [--video F]`: live window, about 21–25 fps, knobs plus per-knob LFOs.
+- `tools/fastsim/live.py [dir] [--video F]`: live window, ~28 fps at ÷4, Program picker (all 136), knobs plus per-knob LFOs.
   - Sources: moving circles, images, video files (OpenCV, played on the 59.94 Hz device clock), camera.
   - Errors are logged to `build/live.log`, never fatal; the simulator process logs to `build/live_harness.log`.
   - Read those logs first when the user reports a crash.
+- `tools/fastsim/sweep.py`: builds and runs every program in parallel. All 133 YUV-core programs pass;
+  the 3 RGB-core ones are unsupported (`docs/fastsim-compat.md`).
 - `tools/sim_gui.sh`: SDK GHDL window with logging to `build/ghdl_gui.log`.
   - It aborts with `QThread: Destroyed while thread is still running` if closed mid-simulation. That's an upstream bug.
 - Packaging: `tools/vm_package.sh <dir>` builds an unsigned `out/rev_b/<name>.vmprog`.

@@ -65,7 +65,8 @@ python3 tools/vm_preview.py programs/cyberyak/<name> \
 python3 tools/fastsim/fastsim.py simulate <program_dir> \
     --capture-frames 48 --output out.gif                     # animation
 python3 tools/fastsim/compare.py <program_dir> ...           # check against GHDL
-python3 tools/fastsim/live.py <program_dir> [--video F]      # live window: knobs + LFOs; circles, image, video or camera source
+python3 tools/fastsim/live.py [program_dir] [--video F]      # live window: program picker, knobs + LFOs; circles/image/video/camera
+python3 tools/fastsim/sweep.py                               # build + run every program (133/133 YUV-core ok)
 tools/vm_package.sh <program_dir>                            # unsigned .vmprog -> out/ (see docs/hardware-test.md)
 python3 videomancer-sdk/tools/vhdl-image-tester/run.py       # SDK simulator GUI
 ```

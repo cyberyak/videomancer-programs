@@ -1,5 +1,24 @@
 # fastsim compatibility (Verilator vs GHDL reference)
 
+## Build-and-run sweep (2026-11-03)
+
+`tools/fastsim/sweep.py` builds every program in the workspace and runs 3 frames
+at ÷4 on `test-images/shapes.png`, four programs at a time. Results go to
+`build/fastsim/sweep/results.md`.
+
+- **All 133 YUV-core programs build and run**: 11 LZX examples, all 121
+  community programs, and Kaleido.
+- **The 3 RGB-core programs are unsupported**: `colorbars_rgb` and `passthru_rgb`
+  (gbr444) and `passthru_gbr422`. The harness wraps the YUV core.
+  `colorbars_rgb` fails to build; the passthrus run, but their colours are
+  interpreted as YUV.
+- **Build** (one-off per program, cached): median 9.9 s, max 46 s.
+- **Run**, 3 frames at 480×270: median 0.42 s, max 3.5 s (czartroniks/pulp).
+- The sweep only shows a program builds and produces frames. Pixel accuracy
+  against GHDL is in the table below; extending it to every program is VM-2.
+
+## Pixel comparison with GHDL
+
 `tools/fastsim/compare.py` runs the SDK's GHDL image tester and fastsim with
 identical settings (1080p29.97 timing, ÷8, `test-images/shapes.png`, TOML
 defaults) and diffs the RGB output.
