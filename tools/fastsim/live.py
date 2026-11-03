@@ -59,10 +59,14 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtMultimedia import QMediaDevices
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                              QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QSlider,
-                             QVBoxLayout, QWidget)
+                             QTabWidget, QVBoxLayout, QWidget)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fastsim  # noqa: E402
+from vpanel import VPanel  # noqa: E402
+import vpanel  # noqa: E402
+
+VPANEL_HELP = (vpanel.__doc__.split("\n\n", 1)[1]).strip()
 from vhdl_image_tester.core.config import ABI_REG_VIDEO_TIMING, resolve_video_settings  # noqa: E402
 from vhdl_image_tester.core.image_converter import _M_YUV_TO_RGB, prepare_image  # noqa: E402
 
@@ -306,6 +310,8 @@ class Live(QWidget):
         self.controls: dict[str, QWidget] = {}          # slider or checkbox per parameter
         self.lfo_widgets: dict[str, tuple] = {}         # (shape, rate, depth) per knob
         self.sim_frame = 0
+        self.shown_values: dict[str, int] = {}          # values after LFOs (panel LEDs)
+        self.modulation_enabled = True                  # panel MOTION button
         self.frames, self.t_last = 0, time.time()
         self._build_ui()
         self.timer = QTimer(self)
@@ -320,7 +326,7 @@ class Live(QWidget):
         view = QVBoxLayout()
         self.out_lbl = QLabel()
         # SD standards are 4:3 on screen (non-square pixels)
-        self.out_lbl.setFixedSize(720 if self.w == 720 else 960, 540)
+        self.out_lbl.setFixedSize(576 if self.w == 720 else 768, 432)
         self.out_lbl.setScaledContents(True)
         self.in_lbl = QLabel()
         self.in_lbl.setFixedSize(320, 180)
@@ -334,7 +340,7 @@ class Live(QWidget):
         view.addLayout(row)
         root.addLayout(view)
 
-        ctl = QGridLayout()
+        head = QGridLayout()
         r = 0
         self.program_box = QComboBox()
         self.program_box.setMaxVisibleItems(30)
@@ -343,8 +349,8 @@ class Live(QWidget):
             if d.resolve() == self.prog_dir:
                 self.program_box.setCurrentIndex(self.program_box.count() - 1)
         self.program_box.currentIndexChanged.connect(self._switch_program)
-        ctl.addWidget(QLabel("<b>Program</b>"), r, 0)
-        ctl.addWidget(self.program_box, r, 1, 1, 2)
+        head.addWidget(QLabel("<b>Program</b>"), r, 0)
+        head.addWidget(self.program_box, r, 1, 1, 2)
         r += 1
         self.mode_box = QComboBox()
         self.mode_box.addItems(list(MODES))
@@ -360,8 +366,8 @@ class Live(QWidget):
                     self.mode_box.model().item(j).setEnabled(False)
                     self.mode_box.setItemData(j, reason, Qt.ItemDataRole.ToolTipRole)
         self.mode_box.currentIndexChanged.connect(self._switch_mode)
-        ctl.addWidget(QLabel("Resolution"), r, 0)
-        ctl.addWidget(self.mode_box, r, 1, 1, 2)
+        head.addWidget(QLabel("Resolution"), r, 0)
+        head.addWidget(self.mode_box, r, 1, 1, 2)
         r += 1
         self.source = QComboBox()
         self.source.addItem(CIRCLES)
@@ -377,14 +383,16 @@ class Live(QWidget):
         for cam, dev in enumerate(QMediaDevices.videoInputs()):
             self.source.addItem(f"Camera: {dev.description()}", cam)
         self.source.currentIndexChanged.connect(self._source_changed)
-        ctl.addWidget(QLabel("Source"), r, 0)
-        ctl.addWidget(self.source, r, 1)
+        head.addWidget(QLabel("Source"), r, 0)
+        head.addWidget(self.source, r, 1)
         r += 1
         self.play = QPushButton("Pause")
         self.play.clicked.connect(self._toggle_play)
-        ctl.addWidget(self.play, r, 0, 1, 2)
+        head.addWidget(self.play, r, 0, 1, 2)
         r += 1
 
+        ctl = QGridLayout()
+        r = 0
         for p in self.program.parameters:
             if p.is_toggle:
                 labels = p.value_labels or ["Off", "On"]
@@ -444,8 +452,20 @@ class Live(QWidget):
         scroll = QScrollArea()
         scroll.setWidget(side)
         scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(470)
-        root.addWidget(scroll)
+
+        # Right column: shared header, then the panel and the control list
+        self.panel = VPanel(self)
+        self.panel.setToolTip(VPANEL_HELP)
+        tabs = QTabWidget()
+        tabs.addTab(self.panel, "Panel")
+        tabs.addTab(scroll, "Controls")
+        right = QVBoxLayout()
+        right.addLayout(head)
+        right.addWidget(tabs, 1)
+        holder = QWidget()
+        holder.setLayout(right)
+        holder.setFixedWidth(580)
+        root.addWidget(holder)
 
     def _set(self, pid, v):
         self.values[pid] = v
@@ -491,6 +511,50 @@ class Live(QWidget):
             text, data = (Path(self._opened).name, self._opened) if self._opened else ("", None)
         self.close()                    # releases the camera / video first
         new.select_source(text, data)
+
+    # -- panel API --------------------------------------------------------------
+    def apply_value(self, pid: str, v: int):
+        """Set a parameter and move its classic widget to match."""
+        self.values[pid] = v
+        w = self.controls.get(pid)
+        if w is not None:
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(v))
+            else:
+                w.setValue(v)
+                self.readouts[pid].setText(str(v))
+            w.blockSignals(False)
+        self.panel.update()
+
+    def set_lfo(self, pid: str, shape=None, rate=None, depth=None):
+        lfo = self.lfos.get(pid)
+        if lfo is None:
+            return
+        if shape is not None:
+            lfo.shape = shape
+        if rate is not None:
+            lfo.rate = rate
+        if depth is not None:
+            lfo.depth = depth
+        sw, rw, dw = self.lfo_widgets[pid]
+        for w in (sw, rw, dw):
+            w.blockSignals(True)
+        sw.setCurrentText(lfo.shape)
+        rw.setValue(lfo.rate)
+        dw.setValue(int(round(lfo.depth * 100)))
+        for w in (sw, rw, dw):
+            w.blockSignals(False)
+        self.panel.update()
+
+    def step_program(self, delta: int):
+        n = self.program_box.count()
+        self.program_box.setCurrentIndex((self.program_box.currentIndex() + delta) % n)
+
+    def set_playing(self, on: bool):
+        if on != self.timer.isActive():
+            self._toggle_play()
+        self.panel.update()
 
     def _lfos_off(self):
         for shape, _, _ in self.lfo_widgets.values():
@@ -588,8 +652,11 @@ class Live(QWidget):
         self.sim_frame += 1
         values = dict(self.values)
         for pid, lfo in self.lfos.items():
-            values[pid] = lfo.apply(self.values[pid], t)
+            if self.modulation_enabled:
+                values[pid] = lfo.apply(self.values[pid], t)
             self.readouts[pid].setText(str(values[pid]))
+        self.shown_values = values
+        self.panel.update()
         regs = self.program.build_register_array(values)
         regs[ABI_REG_VIDEO_TIMING] = self.vs.timing_id
         if self.inflight is not None:
