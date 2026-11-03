@@ -27,7 +27,13 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
   Compare against the passthru figure instead.
 
 ## Validation
-- Simulation is GHDL, still image only, about 60 s per frame at decimation 4. There is no live or real-time input.
+- Two simulation engines, both driving the same raster as the SDK tester:
+  - `tools/fastsim` (Verilator, default in `vm_preview.py`): ~0.05 s per ÷4 frame. It can capture many frames (GIF).
+  - GHDL (`--engine ghdl`, the reference): ~60 s per frame.
+  - `tools/fastsim/compare.py` diffs the two. Known mismatches are in `docs/fastsim-compat.md`;
+    don't trust fastsim alone for those programs yet.
+- fastsim reuses private helpers from the SDK tester (`_ordered_sdk_sources`, `_load_registers`).
+  Recheck them after updating the SDK submodule.
 - Final check is on hardware: copy the `.vmprog` to the SD card `programs/` folder (FAT32).
 
 ## Tracking

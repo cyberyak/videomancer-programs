@@ -1,5 +1,14 @@
 # Fast simulation: Verilator-based near-live preview
 
+**Status (2026-11-03):**
+- Phase 1 is done: `tools/fastsim/fastsim.py`, `tools/fastsim/compare.py`, and `vm_preview.py --engine fast` (the default).
+- Measured:
+  - ~4 s one-off build per program.
+  - 0.05 s per ÷4 frame.
+  - 50 frames of Howler in 0.65 s.
+  - 3 full-1080p Kintsugi frames in 0.79 s.
+- Six of the first eight programs are bit-identical to GHDL. Two differ; see `fastsim-compat.md`.
+
 **Goal:** see a Videomancer program's real output on this Mac at interactive speed,
 from still images, video files, or a live source such as the VS2 app,
 instead of GHDL's ~60 s per quarter-resolution frame.

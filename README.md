@@ -25,7 +25,7 @@ under the same path and submitted as a pull request
 | Path | What |
 |---|---|
 | `programs/cyberyak/` | Our programs (`<name>.vhd`, `<name>.toml`, optional `model/`, `README.md`) |
-| `tools/` | `env.sh` (toolchain), `vm_build.sh` (synth + resources), `vm_preview.py` (simulate → comparison sheet) |
+| `tools/` | `env.sh` (toolchain), `vm_build.sh` (synth + resources), `vm_preview.py` (simulate → comparison sheet), `fastsim/` (Verilator simulator, ~1000× faster than GHDL) |
 | `docs/` | Notes and plans, e.g. [fast simulation scope](docs/fast-sim-scope.md) (Jira: [VM-1](https://cyberyak.atlassian.net/browse/VM-1)) |
 | `test-images/` | Simulation inputs |
 | `videomancer-sdk/`, `videomancer-community-programs/` | Upstream repos as git submodules (read-only references) |
@@ -51,7 +51,10 @@ The path must not contain spaces, because the SDK's FPGA Makefile breaks on them
 source tools/env.sh
 tools/vm_build.sh programs/cyberyak/<name> sd|hd|both        # ~35 s per config
 python3 tools/vm_preview.py programs/cyberyak/<name> \
-    --sweep rotary_potentiometer_1=0,512,1023                # ~60 s per frame
+    --sweep rotary_potentiometer_1=0,512,1023                # fast engine: <1 s per frame
+python3 tools/fastsim/fastsim.py simulate <program_dir> \
+    --capture-frames 48 --output out.gif                     # animation
+python3 tools/fastsim/compare.py <program_dir> ...           # check against GHDL
 python3 videomancer-sdk/tools/vhdl-image-tester/run.py       # SDK simulator GUI
 ```
 

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Simulate a Videomancer program on a still image and build a labelled sheet.
 
-Runs the SDK's GHDL-based VHDL image tester once per setting (about 60 s each
-at the default 1/4 resolution) and lays the input and every output side by side.
+Runs one simulation per setting and lays the input and every output side by side.
+Engines:
+  fast  Verilator via tools/fastsim (default; well under a second per frame
+        after a one-off ~4 s build per program)
+  ghdl  the SDK's VHDL image tester (reference; about 60 s per frame at ÷4)
 
   tools/vm_preview.py <program_dir> [--image IMG] [--set KEY=V ...]
-                      [--sweep KEY=V1,V2,...] [--decimation N] [--out PNG]
+                      [--sweep KEY=V1,V2,...] [--decimation N]
+                      [--engine fast|ghdl] [--out PNG]
 
 Examples:
   tools/vm_preview.py videomancer-sdk/programs/sabattier
@@ -26,6 +30,19 @@ ROOT = Path(__file__).resolve().parent.parent
 CLI = ROOT / "videomancer-sdk/tools/vhdl-image-tester/run.py"
 DEFAULT_IMAGE = ROOT / "test-images/shapes.png"
 TILE_W, LABEL_H, GAP = 480, 22, 8
+
+
+def simulate_fast(prog_dir, image, sets, decimation, out_png):
+    sys.path.insert(0, str(ROOT / "tools/fastsim"))
+    import fastsim
+    program = fastsim.load_program(prog_dir.name, prog_dir.parent)
+    values = fastsim._load_registers(program, sets, None)
+    try:
+        frames = fastsim.simulate(prog_dir, Image.open(image), values,
+                                  decimation=decimation, log=lambda *_: None)
+    except RuntimeError as e:
+        sys.exit(f"simulation failed for {sets or 'defaults'}:\n{e}")
+    frames[-1].save(out_png)
 
 
 def simulate(prog_dir, image, sets, decimation, out_png):
@@ -64,8 +81,10 @@ def main():
     ap.add_argument("--set", action="append", default=[], metavar="KEY=V")
     ap.add_argument("--sweep", metavar="KEY=V1,V2,...")
     ap.add_argument("--decimation", type=int, default=4)
+    ap.add_argument("--engine", choices=["fast", "ghdl"], default="fast")
     ap.add_argument("--out", type=Path)
     a = ap.parse_args()
+    run_sim = simulate_fast if a.engine == "fast" else simulate
 
     prog = a.program_dir.resolve()
     if not (prog / f"{prog.name}.toml").exists():
@@ -82,7 +101,7 @@ def main():
     for i, (label, sets) in enumerate(runs):
         png = work / f"run{i}.png"
         print(f"[{i + 1}/{len(runs)}] {label} ...", flush=True)
-        simulate(prog, a.image, sets, a.decimation, png)
+        run_sim(prog, a.image, sets, a.decimation, png)
         tiles.append((label, Image.open(png)))
 
     out = a.out or work / "sheet.png"
