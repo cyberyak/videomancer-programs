@@ -6,13 +6,13 @@
 [program]
 program_id = "com.cyberyak.kaleido"
 program_name = "Kaleido"
-program_version = "0.1.0"
+program_version = "0.2.0"
 abi_version = ">=1.0,<2.0"
 author = "cyberyak"
 license = "GPL-3.0"
 categories = ["Mirror", "Pattern"]
 program_type = "processing"
-description = "2-D kaleidoscope: a captured window of the input folded into a spinning square mirror tiling (p4m)"
+description = "2-D kaleidoscope: a captured window of the input folded into spinning square, triangle or hex mirror tilings"
 hardware_compatibility = ["rev_b"]
 core = "yuv444_30b"
 url = "https://github.com/cyberyak/videomancer-programs"
@@ -98,6 +98,12 @@ value_labels = ["Off", "Glow"]
 initial_value_label = "Off"
 
 [[parameter]]
+parameter_id = "toggle_switch_11"
+name_label = "Shape"
+value_labels = ["Square", "Triangle"]
+initial_value_label = "Square"
+
+[[parameter]]
 parameter_id = "linear_potentiometer_12"
 name_label = "Mix"
 control_mode = "linear"
@@ -122,3 +128,15 @@ rotary_potentiometer_3 = 600
 name = "Wallpaper"
 rotary_potentiometer_2 = 850
 toggle_switch_8 = 1
+
+[[preset]]
+name = "Hex"
+rotary_potentiometer_2 = 550
+toggle_switch_11 = 1
+
+[[preset]]
+name = "Toy Mirrors"
+rotary_potentiometer_2 = 600
+rotary_potentiometer_3 = 580
+toggle_switch_8 = 1
+toggle_switch_11 = 1

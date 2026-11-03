@@ -14,13 +14,14 @@
 --   A two-dimensional kaleidoscope. Videomancer has no frame buffer, so a
 --   window of the input is captured into a coarse tile store (128 x 128 luma,
 --   64 x 32 chroma) and every output pixel reads the store through a
---   rotating, zooming coordinate that is folded by the square mirror group
---   p4m: mirror lines on the tile edges plus one diagonal. A kaleidoscope
---   shows one fundamental region many times, so the coarse store still
---   fills the screen.
+--   rotating, zooming coordinate folded by a mirror group:
+--     Square    p4m   mirror lines on the tile edges (+ one diagonal)
+--     Triangle  *333  the classic three-mirror toy kaleidoscope
+--     Hex       *632  triangle + its median mirror (Triangle with Diagonal)
+--   A kaleidoscope shows one fundamental region many times, so the coarse
+--   store still fills the screen.
 --
---   Version 0.1: square mode only (see DESIGN.md for the radial, triangle
---   and hex modes).
+--   Version 0.2: square, triangle and hex (see DESIGN.md for radial).
 --
 -- Resources:
 --   Luma store  16384 x 6 bit (inferred EBR, 24 blocks)
@@ -37,9 +38,25 @@
 --   (>=1024: 0, >=512: 1, >=256: 2, else 3) so decimated simulations and SD
 --   keep the HD composition.
 --
--- Fold (p4m):
+-- Square fold (p4m):
 --   fraction f = u(15 downto 9) (7 bits = store column); Mirror mode inverts
 --   f on odd tiles (u(16) = '1'); Diagonal swaps (fu, fv) when fv > fu.
+--
+-- Triangle fold (*333), derived and verified in model/derive_tri_maps.py:
+--   Skewed coordinates y' = v * 2/sqrt3 (shift-add), x' = u - y'/2 put the
+--   mirror lines on x' = k, y' = k, x' + y' = k. With I, J the integer parts
+--   and f, g the 10-bit fractions, the group's translations repeat every
+--   3 rhombi, so the fold into T = {s, t >= 0, s + t <= 1} is one of six
+--   0/+-1 affine maps chosen by m = (I - J) mod 3 and f + g >= 1:
+--     m=0 lower  s = f            t = g
+--     m=0 upper  s = 1 - g        t = 1 - f
+--     m=1 lower  s = 1 - f - g    t = f
+--     m=1 upper  s = f + g - 1    t = 1 - g
+--     m=2 lower  s = g            t = 1 - f - g
+--     m=2 upper  s = 1 - f        t = f + g - 1
+--   Hex adds the median mirror: swap (s, t) when t > s. The store is read
+--   at the Cartesian point X = s + t/2, Y = t * sqrt3/2, so T shows an
+--   undistorted equilateral triangle of the captured window.
 --
 -- Capture:
 --   col = (x - xc) * r + 64 * 256, row likewise (r = store cells per pixel
@@ -48,11 +65,21 @@
 --   Y is stored rounded to 6 bits, U/V to 4.
 --
 -- Pipeline (data_in -> data_out):
---   P0  register (u, v) and input        P1  tile fraction + mirror
---   P2  diagonal swap, store address     P3  store read
---   P4  expand to 10 bit, seam glow      P5..P7  pad
+--         square path                    triangle path
+--   P0    register (u, v) and input
+--   P1    tile fraction + mirror         y' partial sums
+--   P2    diagonal swap, address         y'
+--   P3    (delay)                        x' = u - y'/2
+--   P4    (delay)                        d = I - J, f, g, f + g
+--   P5    (delay)                        m = d mod 3, upper
+--   P6    (delay)                        affine map -> (s, t)
+--   P7    (delay)                        hex swap, seam flag
+--   P8    address mux                    X, Y -> address
+--   P9    store read
+--   P10   expand to 10 bit, seam glow
+--   P11   pad
 --   interpolator (dry/wet mix)           4 clocks
---   Total C_PROCESSING_DELAY_CLKS = 12 (divisible by 4)
+--   Total C_PROCESSING_DELAY_CLKS = 16 (divisible by 4)
 --
 -- Limitations (v0.1):
 --   Interlaced inputs are treated per field (the pattern is 2:1 stretched).
@@ -65,10 +92,12 @@
 --   Pot 4  (registers_in(3))    Source X   capture window pan
 --   Pot 5  (registers_in(4))    Source Y   capture window pan
 --   Pot 6  (registers_in(5))    Window     capture window size
---   Tog 7  (registers_in(6)(0)) Mirror / Repeat
---   Tog 8  (registers_in(6)(1)) Diagonal on / off
+--   Tog 7  (registers_in(6)(0)) Mirror / Repeat (square only)
+--   Tog 8  (registers_in(6)(1)) Diagonal on / off (square p4m vs pmm,
+--                               triangle: on = hex *632, off = *333)
 --   Tog 9  (registers_in(6)(2)) Capture live / freeze
 --   Tog 10 (registers_in(6)(3)) Seams off / glow
+--   Tog 11 (registers_in(6)(4)) Shape square / triangle
 --   Fader  (registers_in(7))    Mix        dry/wet
 --------------------------------------------------------------------------------
 library ieee;
@@ -82,8 +111,8 @@ use work.video_timing_pkg.all;
 
 architecture kaleido of program_top is
 
-    constant C_PROCESSING_DELAY_CLKS : integer := 12;
-    constant C_WET_CLKS              : integer := 8;   -- P0..P7
+    constant C_PROCESSING_DELAY_CLKS : integer := 16;
+    constant C_WET_CLKS              : integer := 12;  -- P0..P11
     constant C_MUL_STEPS             : integer := 14;  -- multiplier bits
 
     -- ------------------------------------------------------------------------
@@ -107,6 +136,7 @@ architecture kaleido of program_top is
     signal s_diag_off   : std_logic;
     signal s_freeze     : std_logic;
     signal s_seams      : std_logic;
+    signal s_triangle   : std_logic;
     signal s_mix        : unsigned(9 downto 0);
 
     -- ------------------------------------------------------------------------
@@ -156,16 +186,52 @@ architecture kaleido of program_top is
     -- Pipeline
     -- ------------------------------------------------------------------------
     signal p0_u, p0_v       : signed(23 downto 0) := (others => '0');
-    signal p1_fu, p1_fv     : unsigned(6 downto 0) := (others => '0');
-    signal p2_addr_y        : unsigned(13 downto 0) := (others => '0');
-    signal p2_addr_c        : unsigned(10 downto 0) := (others => '0');
-    signal p2_seam, p3_seam : std_logic := '0';
-    signal p3_y             : unsigned(5 downto 0) := (others => '0');
-    signal p3_c             : std_logic_vector(7 downto 0) := x"88";
-    signal p4_y, p4_u, p4_v : unsigned(9 downto 0) := (others => '0');
 
-    type t_pad is array (0 to 2) of unsigned(9 downto 0);
-    signal s_pad_y, s_pad_u, s_pad_v : t_pad := (others => (others => '0'));
+    -- Square path: address ready at P2, delayed to P8
+    signal p1_fu, p1_fv     : unsigned(6 downto 0) := (others => '0');
+    type t_sq_addr is array (2 to 7) of unsigned(13 downto 0);
+    signal sq_addr          : t_sq_addr := (others => (others => '0'));
+    signal sq_seam          : std_logic_vector(2 to 7) := (others => '0');
+
+    -- Triangle path
+    signal p1_ya, p1_yb     : signed(23 downto 0) := (others => '0');
+    signal p1_u, p2_u       : signed(23 downto 0) := (others => '0');
+    signal p2_y, p3_x, p3_y : signed(23 downto 0) := (others => '0');
+    signal p4_d             : signed(8 downto 0) := (others => '0');
+    signal p4_f, p4_g       : unsigned(9 downto 0) := (others => '0');
+    signal p4_fg            : unsigned(10 downto 0) := (others => '0');
+    signal p5_m             : unsigned(1 downto 0) := (others => '0');
+    signal p5_upper         : std_logic := '0';
+    signal p5_f, p5_g       : unsigned(9 downto 0) := (others => '0');
+    signal p5_fg            : unsigned(10 downto 0) := (others => '0');
+    signal p6_s, p6_t       : unsigned(10 downto 0) := (others => '0');
+    signal p7_s, p7_t       : unsigned(10 downto 0) := (others => '0');
+    signal p7_seam          : std_logic := '0';
+
+    -- Shared tail
+    signal p8_addr_y        : unsigned(13 downto 0) := (others => '0');
+    signal p8_seam, p9_seam : std_logic := '0';
+    signal p9_y             : unsigned(5 downto 0) := (others => '0');
+    signal p9_c             : std_logic_vector(7 downto 0) := x"88";
+    signal p10_y, p10_u, p10_v : unsigned(9 downto 0) := (others => '0');
+    signal p11_y, p11_u, p11_v : unsigned(9 downto 0) := (others => '0');
+
+    -- (I - J) mod 3 for the 9-bit two's-complement difference
+    type t_mod3 is array (0 to 511) of unsigned(1 downto 0);
+    function gen_mod3 return t_mod3 is
+        variable r : t_mod3;
+        variable d : integer;
+    begin
+        for i in 0 to 511 loop
+            d := i;
+            if i >= 256 then
+                d := i - 512;
+            end if;
+            r(i) := to_unsigned(d mod 3, 2);
+        end loop;
+        return r;
+    end function;
+    constant C_MOD3 : t_mod3 := gen_mod3;
 
     signal s_wr_en          : std_logic := '0';
     signal s_wr_addr_y      : unsigned(13 downto 0) := (others => '0');
@@ -203,6 +269,7 @@ begin
     s_diag_off   <= registers_in(6)(1);
     s_freeze     <= registers_in(6)(2);
     s_seams      <= registers_in(6)(3);
+    s_triangle   <= registers_in(6)(4);
     s_mix        <= unsigned(registers_in(7));
 
     sin_cos_inst : entity work.sin_cos_full_lut_10x10
@@ -368,7 +435,7 @@ begin
             if s_wr_en = '1' then
                 ram_y(to_integer(s_wr_addr_y)) <= s_wr_y;
             end if;
-            p3_y <= ram_y(to_integer(p2_addr_y));
+            p9_y <= ram_y(to_integer(p8_addr_y));
         end if;
     end process p_ram_y;
 
@@ -378,7 +445,8 @@ begin
             if s_wr_en = '1' then
                 ram_c(to_integer(s_wr_addr_c)) <= s_wr_c;
             end if;
-            p3_c <= ram_c(to_integer(p2_addr_c));
+            -- Chroma cell = luma row / 4, column / 2
+            p9_c <= ram_c(to_integer(p8_addr_y(13 downto 9) & p8_addr_y(6 downto 1)));
         end if;
     end process p_ram_c;
 
@@ -387,12 +455,19 @@ begin
     -- ========================================================================
     p_fold : process(clk)
         variable v_fu, v_fv : unsigned(6 downto 0);
+        variable v_s, v_t   : unsigned(10 downto 0);
+        variable v_x, v_y   : unsigned(10 downto 0);
+        variable v_col      : unsigned(6 downto 0);
+        constant C_ONE      : unsigned(10 downto 0) := to_unsigned(1024, 11);
     begin
         if rising_edge(clk) then
             -- P0
             p0_u <= s_u;
             p0_v <= s_v;
 
+            -- ---------------------------------------------------------------
+            -- Square path (P1, P2, then delayed to P8)
+            -- ---------------------------------------------------------------
             -- P1: tile fraction, mirrored on odd tiles
             v_fu := unsigned(p0_u(15 downto 9));
             v_fv := unsigned(p0_v(15 downto 9));
@@ -405,7 +480,7 @@ begin
             p1_fu <= v_fu;
             p1_fv <= v_fv;
 
-            -- P2: diagonal mirror, store addresses, seam flag
+            -- P2: diagonal mirror, store address, seam flag
             if s_diag_off = '0' and p1_fv > p1_fu then
                 v_fu := p1_fv;
                 v_fv := p1_fu;
@@ -413,35 +488,115 @@ begin
                 v_fu := p1_fu;
                 v_fv := p1_fv;
             end if;
-            p2_addr_y <= v_fv & v_fu;
-            p2_addr_c <= v_fv(6 downto 2) & v_fu(6 downto 1);
+            sq_addr(2) <= v_fv & v_fu;
             if v_fu = 0 or v_fu = 127 or v_fv = 0 or v_fv = 127
                or (s_diag_off = '0' and v_fu = v_fv) then
-                p2_seam <= s_seams;
+                sq_seam(2) <= s_seams;
             else
-                p2_seam <= '0';
+                sq_seam(2) <= '0';
+            end if;
+            sq_addr(3 to 7) <= sq_addr(2 to 6);
+            sq_seam(3 to 7) <= sq_seam(2 to 6);
+
+            -- ---------------------------------------------------------------
+            -- Triangle path (P1..P8)
+            -- ---------------------------------------------------------------
+            -- P1, P2: y' = v * 2/sqrt3 ~= v * (1 + 1/8 + 1/32 - 1/512)
+            p1_ya <= p0_v + shift_right(p0_v, 3);
+            p1_yb <= shift_right(p0_v, 5) - shift_right(p0_v, 9);
+            p1_u  <= p0_u;
+            p2_y  <= p1_ya + p1_yb;
+            p2_u  <= p1_u;
+
+            -- P3: x' = u - y'/2
+            p3_x <= p2_u - shift_right(p2_y, 1);
+            p3_y <= p2_y;
+
+            -- P4: rhombus difference and 10-bit fractions
+            p4_d  <= resize(p3_x(23 downto 16), 9) - resize(p3_y(23 downto 16), 9);
+            p4_f  <= unsigned(p3_x(15 downto 6));
+            p4_g  <= unsigned(p3_y(15 downto 6));
+            p4_fg <= resize(unsigned(p3_x(15 downto 6)), 11) + resize(unsigned(p3_y(15 downto 6)), 11);
+
+            -- P5: which of the six cases
+            p5_m     <= C_MOD3(to_integer(unsigned(p4_d)));
+            p5_upper <= p4_fg(10);   -- f + g >= 1
+            p5_f     <= p4_f;
+            p5_g     <= p4_g;
+            p5_fg    <= p4_fg;
+
+            -- P6: affine map into T (1.0 = 1024)
+            if p5_upper = '0' then
+                case p5_m is
+                    when "01"   => p6_s <= C_ONE - p5_fg;        p6_t <= resize(p5_f, 11);
+                    when "10"   => p6_s <= resize(p5_g, 11);     p6_t <= C_ONE - p5_fg;
+                    when others => p6_s <= resize(p5_f, 11);     p6_t <= resize(p5_g, 11);
+                end case;
+            else
+                case p5_m is
+                    when "01"   => p6_s <= p5_fg - C_ONE;        p6_t <= C_ONE - p5_g;
+                    when "10"   => p6_s <= C_ONE - p5_f;         p6_t <= p5_fg - C_ONE;
+                    when others => p6_s <= C_ONE - p5_g;         p6_t <= C_ONE - p5_f;
+                end case;
             end if;
 
-            -- P3: store read happens in p_ram_y / p_ram_c
-            p3_seam <= p2_seam;
+            -- P7: hex adds the median mirror (swap when t > s); seam flag
+            if s_diag_off = '0' and p6_t > p6_s then
+                v_s := p6_t;
+                v_t := p6_s;
+            else
+                v_s := p6_s;
+                v_t := p6_t;
+            end if;
+            p7_s <= v_s;
+            p7_t <= v_t;
+            if v_s < 8 or v_t < 8 or v_s + v_t > 1016
+               or (s_diag_off = '0' and v_s - v_t < 8) then
+                p7_seam <= s_seams;
+            else
+                p7_seam <= '0';
+            end if;
 
-            -- P4: expand to 10 bits, seam glow
-            if p3_seam = '1' then
-                if p3_y >= 48 then
-                    p4_y <= to_unsigned(940, 10);
+            -- P8: Cartesian store address (X = s + t/2, Y = t * sqrt3/2), or
+            -- the square path's address
+            v_x := p7_s + shift_right(p7_t, 1);
+            v_y := p7_t - shift_right(p7_t, 3) - shift_right(p7_t, 7);
+            if v_x(10) = '1' then
+                v_col := (others => '1');
+            else
+                v_col := v_x(9 downto 3);
+            end if;
+            if s_triangle = '1' then
+                p8_addr_y <= v_y(9 downto 3) & v_col;
+                p8_seam   <= p7_seam;
+            else
+                p8_addr_y <= sq_addr(7);
+                p8_seam   <= sq_seam(7);
+            end if;
+
+            -- ---------------------------------------------------------------
+            -- Shared tail
+            -- ---------------------------------------------------------------
+            -- P9: store read happens in p_ram_y / p_ram_c
+            p9_seam <= p8_seam;
+
+            -- P10: expand to 10 bits, seam glow
+            if p9_seam = '1' then
+                if p9_y >= 48 then
+                    p10_y <= to_unsigned(940, 10);
                 else
-                    p4_y <= (p3_y & "0000") + 192;
+                    p10_y <= (p9_y & "0000") + 192;
                 end if;
             else
-                p4_y <= p3_y & "0000";
+                p10_y <= p9_y & "0000";
             end if;
-            p4_u <= unsigned(p3_c(7 downto 4)) & "000000";
-            p4_v <= unsigned(p3_c(3 downto 0)) & "000000";
+            p10_u <= unsigned(p9_c(7 downto 4)) & "000000";
+            p10_v <= unsigned(p9_c(3 downto 0)) & "000000";
 
-            -- P5..P7: pad to C_WET_CLKS
-            s_pad_y <= p4_y & s_pad_y(0 to 1);
-            s_pad_u <= p4_u & s_pad_u(0 to 1);
-            s_pad_v <= p4_v & s_pad_v(0 to 1);
+            -- P11: pad to C_WET_CLKS
+            p11_y <= p10_y;
+            p11_u <= p10_u;
+            p11_v <= p10_v;
         end if;
     end process p_fold;
 
@@ -452,21 +607,21 @@ begin
         generic map(G_WIDTH => C_VIDEO_DATA_WIDTH, G_FRAC_BITS => C_VIDEO_DATA_WIDTH,
                     G_OUTPUT_MIN => 0, G_OUTPUT_MAX => 1023)
         port map(clk => clk, enable => '1',
-                 a => unsigned(s_dry_y), b => s_pad_y(2),
+                 a => unsigned(s_dry_y), b => p11_y,
                  t => s_mix, result => s_mix_y, valid => s_mix_y_valid);
 
     mix_u_inst : entity work.interpolator_u
         generic map(G_WIDTH => C_VIDEO_DATA_WIDTH, G_FRAC_BITS => C_VIDEO_DATA_WIDTH,
                     G_OUTPUT_MIN => 0, G_OUTPUT_MAX => 1023)
         port map(clk => clk, enable => '1',
-                 a => unsigned(s_dry_u), b => s_pad_u(2),
+                 a => unsigned(s_dry_u), b => p11_u,
                  t => s_mix, result => s_mix_u, valid => s_mix_u_valid);
 
     mix_v_inst : entity work.interpolator_u
         generic map(G_WIDTH => C_VIDEO_DATA_WIDTH, G_FRAC_BITS => C_VIDEO_DATA_WIDTH,
                     G_OUTPUT_MIN => 0, G_OUTPUT_MAX => 1023)
         port map(clk => clk, enable => '1',
-                 a => unsigned(s_dry_v), b => s_pad_v(2),
+                 a => unsigned(s_dry_v), b => p11_v,
                  t => s_mix, result => s_mix_v, valid => s_mix_v_valid);
 
     -- ========================================================================

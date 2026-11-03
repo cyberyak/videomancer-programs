@@ -2,19 +2,26 @@
 
 ## Status (2026-11-03)
 
-v0.1 implements **square mode (p4m)** in `kaleido.vhd`.
+v0.2 implements three of the four modes in `kaleido.vhd`:
 
-- **Simulation:** fastsim output is bit-identical to GHDL.
+| Mode | Group | Switches |
+|---|---|---|
+| Square | p4m, or pmm with Diagonal off | S11 = Square |
+| Triangle | *333, the toy kaleidoscope | S11 = Triangle, S8 Diagonal = Off |
+| Hex | *632 / p6m | S11 = Triangle, S8 Diagonal = On |
+
+- **Simulation:** all three modes are bit-identical in fastsim and GHDL.
 - **Synthesis:**
-  - HD: 5,219 LC and 28/32 EBR, Fmax 54.8 MHz (the same reported figure as passthru).
-  - SD: 5,299 LC, passes 27 MHz.
+  - HD: 6,198 LC and 28/32 EBR. Fmax is reported as 52.4 MHz, against 56–57 for passthru; the HD "FAIL" line also appears for passthru, so this needs confirming on hardware.
+  - SD: 6,249 LC, passes 27 MHz.
 - **Not yet tried on hardware.**
 - **Previews:** the store settles over 3 frames, so use `--warmup 4`.
 
-Next modes, in order: triangle (*333), hex (*632), radial. About 2,400 LC remain.
+**Triangle fold:** this replaced the iterative reflections planned in §3. In skewed lattice coordinates the fold is one of six 0/±1 affine maps, chosen by `(I − J) mod 3` and the triangle half. `model/derive_tri_maps.py` derives the maps and verifies them on 20,000 points.
 
-Preview from the reference model: `model/out/contact_sheet.png`
-(regenerate with `python3 model/kaleido_model.py model/input.png model/out`).
+**Hex:** the triangle fold plus a swap of (s, t). It costs almost nothing.
+
+Radial remains (CORDIC). With about 1,400 LC left it may need to be its own program.
 
 ## 1. What the hardware allows
 
