@@ -271,7 +271,11 @@ class Live(QWidget):
     def __init__(self, prog_dir: Path, mode: str | None = None):
         super().__init__()
         self.prog_dir = prog_dir.resolve()
+        self.needs_real = fastsim.uses_timing_id(self.prog_dir)
         self.mode = mode or auto_mode(self.prog_dir)
+        if self.needs_real and not MODES[self.mode][2]:
+            log.info("%s needs real timing; using 480p real instead of %s", self.prog_dir.name, self.mode)
+            self.mode = "480p real"
         video_mode, decimation, self.real_timing = MODES[self.mode]
         self._opened: str | None = None     # file chosen with "Open image/video…"
         self.program = fastsim.load_program(self.prog_dir.name, self.prog_dir.parent)
@@ -347,6 +351,14 @@ class Live(QWidget):
         self.mode_box.setCurrentText(self.mode)
         self.mode_box.setToolTip("÷4/÷2: compact raster, fast. 'real': the standard's true resolution\n"
                                  "and blanking, for programs that use the timing ID or blanking time.")
+        if self.needs_real:
+            # Compact modes can't work for these programs: grey them out
+            reason = ("Not available: this program sizes its picture from the video\n"
+                      "standard, so it needs real timing (480p real is the fastest).")
+            for j, (name, (_, _, real)) in enumerate(MODES.items()):
+                if not real:
+                    self.mode_box.model().item(j).setEnabled(False)
+                    self.mode_box.setItemData(j, reason, Qt.ItemDataRole.ToolTipRole)
         self.mode_box.currentIndexChanged.connect(self._switch_mode)
         ctl.addWidget(QLabel("Resolution"), r, 0)
         ctl.addWidget(self.mode_box, r, 1, 1, 2)
