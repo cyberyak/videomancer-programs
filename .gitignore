@@ -1,0 +1,9 @@
+build/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+*.vmprog
+# personal Claude Code settings
+.claude/settings.local.json
+CLAUDE.local.md
