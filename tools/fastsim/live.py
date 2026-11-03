@@ -46,6 +46,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtMultimedia import QMediaDevices
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
                              QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QSlider,
                              QVBoxLayout, QWidget)
@@ -102,7 +103,8 @@ class VideoSource:
 
     CAMERA_HELP = ("If macOS blocked it: System Settings > Privacy & Security > Camera, "
                    "allow the app this runs in (Claude or Terminal), then reopen the window. "
-                   "A virtual camera (VS2/OBS) may be Camera 1 or 2.")
+                   "A virtual camera (VS2/OBS) is listed by name once its app is running; "
+                   "reopen the window to refresh the list.")
 
     def __init__(self, spec: str | int, w: int, h: int):
         import cv2
@@ -284,8 +286,10 @@ class Live(QWidget):
             self.source.addItem(p.name, str(p))
         self.source.addItem("Open image…")
         self.source.addItem("Open video…")
-        for cam in range(3):
-            self.source.addItem(f"Camera {cam}", cam)
+        # Cameras that exist, by name. OpenCV's AVFoundation backend numbers
+        # devices in the same discovery order as Qt's list.
+        for cam, dev in enumerate(QMediaDevices.videoInputs()):
+            self.source.addItem(f"Camera: {dev.description()}", cam)
         self.source.currentIndexChanged.connect(self._source_changed)
         ctl.addWidget(QLabel("Source"), r, 0)
         ctl.addWidget(self.source, r, 1)
@@ -386,7 +390,7 @@ class Live(QWidget):
         data = self.source.itemData(i)
         if text == CIRCLES:
             pass
-        elif text.startswith("Camera "):
+        elif text.startswith("Camera: "):
             self._start_video(int(data))
         elif text == "Open video…":
             path, _ = QFileDialog.getOpenFileName(
