@@ -16,6 +16,7 @@
 // testbench, it can capture several consecutive frames.
 //
 // Usage: harness IN.raw OUT.raw W H INTERLACED WARMUP CAPTURE REGS
+//        harness --serve W H        (see serve() below)
 //   IN.raw   W*H*3 uint16 (Y,U,V per pixel, row-major), 10-bit values
 //   OUT.raw  CAPTURE*W*H*3 uint16 in the same layout (fields weaved)
 //   REGS     32 comma-separated register values (0-1023)
@@ -82,7 +83,47 @@ struct Sim {
     }
 };
 
+static void set_regs(Vvm_fastsim_top &top, const int *regs) {
+    top.r0 = regs[0];   top.r1 = regs[1];   top.r2 = regs[2];   top.r3 = regs[3];
+    top.r4 = regs[4];   top.r5 = regs[5];   top.r6 = regs[6];   top.r7 = regs[7];
+    top.r8 = regs[8];   top.r9 = regs[9];   top.r10 = regs[10]; top.r11 = regs[11];
+    top.r12 = regs[12]; top.r13 = regs[13]; top.r14 = regs[14]; top.r15 = regs[15];
+    top.r16 = regs[16]; top.r17 = regs[17]; top.r18 = regs[18]; top.r19 = regs[19];
+    top.r20 = regs[20]; top.r21 = regs[21]; top.r22 = regs[22]; top.r23 = regs[23];
+    top.r24 = regs[24]; top.r25 = regs[25]; top.r26 = regs[26]; top.r27 = regs[27];
+    top.r28 = regs[28]; top.r29 = regs[29]; top.r30 = regs[30]; top.r31 = regs[31];
+}
+
+// Serve mode: keep one simulation alive across frames (state such as spin
+// and the tile store carries over). Per frame, stdin carries one text line
+// of 32 comma-separated registers followed by W*H*3 uint16 (progressive);
+// stdout returns the captured W*H*3 uint16 output of that frame.
+static int serve(int w, int h) {
+    Sim s;
+    s.w = w; s.field_h = h; s.warmup_fields = 0; s.capture_fields = 1;
+    s.target = (size_t)w * h * 3;
+    std::vector<uint16_t> img(s.target), out(s.target);
+    char line[4096];
+    int regs[32];
+    while (fgets(line, sizeof line, stdin)) {
+        memset(regs, 0, sizeof regs);
+        char *tok = strtok(line, ",\n");
+        for (int i = 0; i < 32 && tok; i++, tok = strtok(nullptr, ",\n")) regs[i] = atoi(tok);
+        if (fread(img.data(), 2, img.size(), stdin) != img.size()) return 1;
+        set_regs(s.top, regs);
+        s.captured.clear(); s.capturing = false; s.out_field = 0;
+        s.field(img.data(), 0, 1, true);
+        size_t got = s.captured.size(), pad = s.target - got;
+        for (size_t i = 0; i < pad; i += 3) { out[i] = 64; out[i + 1] = 512; out[i + 2] = 512; }
+        memcpy(out.data() + pad, s.captured.data(), got * 2);
+        fwrite(out.data(), 2, out.size(), stdout);
+        fflush(stdout);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "--serve") == 0) return serve(atoi(argv[2]), atoi(argv[3]));
     if (argc != 9) {
         fprintf(stderr, "usage: %s IN.raw OUT.raw W H INTERLACED WARMUP CAPTURE REGS\n", argv[0]);
         return 2;
@@ -102,14 +143,7 @@ int main(int argc, char **argv) {
     int regs[32] = {0};
     char *tok = strtok(argv[8], ",");
     for (int i = 0; i < 32 && tok; i++, tok = strtok(nullptr, ",")) regs[i] = atoi(tok);
-    s.top.r0 = regs[0];   s.top.r1 = regs[1];   s.top.r2 = regs[2];   s.top.r3 = regs[3];
-    s.top.r4 = regs[4];   s.top.r5 = regs[5];   s.top.r6 = regs[6];   s.top.r7 = regs[7];
-    s.top.r8 = regs[8];   s.top.r9 = regs[9];   s.top.r10 = regs[10]; s.top.r11 = regs[11];
-    s.top.r12 = regs[12]; s.top.r13 = regs[13]; s.top.r14 = regs[14]; s.top.r15 = regs[15];
-    s.top.r16 = regs[16]; s.top.r17 = regs[17]; s.top.r18 = regs[18]; s.top.r19 = regs[19];
-    s.top.r20 = regs[20]; s.top.r21 = regs[21]; s.top.r22 = regs[22]; s.top.r23 = regs[23];
-    s.top.r24 = regs[24]; s.top.r25 = regs[25]; s.top.r26 = regs[26]; s.top.r27 = regs[27];
-    s.top.r28 = regs[28]; s.top.r29 = regs[29]; s.top.r30 = regs[30]; s.top.r31 = regs[31];
+    set_regs(s.top, regs);
 
     int fields_per_frame = interlaced ? 2 : 1;
     s.w = w;

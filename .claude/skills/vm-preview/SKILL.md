@@ -36,3 +36,9 @@ python3 tools/fastsim/fastsim.py simulate <program_dir> --capture-frames 60 --ou
 
 This captures consecutive frames after the warm-up frames. Programs that animate from a frame counter
 or have feedback show real motion. `--fps` sets the GIF playback rate (default 12).
+
+## Live window (for the user)
+
+`python3 tools/fastsim/live.py <program_dir>` opens a window with the program running continuously
+(about 30 fps at ÷4): TOML-labelled knobs and switches, and a "Moving circles" source or still images.
+Launch it in a terminal tab for the user; it needs a display, so it can't be used headless.

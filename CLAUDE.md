@@ -34,7 +34,11 @@ Developing FPGA video programs for an LZX Videomancer (iCE40 HX4K, VHDL).
     don't trust fastsim alone for those programs yet.
 - fastsim reuses private helpers from the SDK tester (`_ordered_sdk_sources`, `_load_registers`).
   Recheck them after updating the SDK submodule.
-- Final check is on hardware: copy the `.vmprog` to the SD card `programs/` folder (FAT32).
+- `tools/fastsim/live.py <dir>`: live window, about 30 fps, knobs plus a moving-circles source.
+- Packaging: `tools/vm_package.sh <dir>` builds an unsigned `out/rev_b/<name>.vmprog`.
+  - The SDK's script hard-codes `/usr/bin/python3`, so the wrapper patches a copy.
+  - Use unsigned, not self-signed: invalid signatures are rejected, so Developer Mode is likely needed.
+  - Steps and checklist: `docs/hardware-test.md`.
 
 ## Tracking
 - Jira space **VM – Videomancer** at cyberyak.atlassian.net (cloudId `dd2327c3-0138-475a-be96-743584522509`), Kanban.

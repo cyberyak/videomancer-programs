@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+# Copyright (C) 2026 cyberyak
+# SPDX-License-Identifier: GPL-3.0-only
+"""Live fastsim preview: a Videomancer program running continuously.
+
+The program's VHDL runs in Verilator (tools/fastsim) frame after frame, so
+state carries over: spin animates, stores settle, feedback evolves. Knobs,
+switches and the fader come from the program's TOML and act immediately.
+
+Sources:
+  Moving circles  bouncing circles generated on the fly (the input moves)
+  any image       still images from test-images/ or a file you open
+
+  python3 tools/fastsim/live.py <program_dir> [--decimation 4]
+
+Run with the bundled Python: `source tools/env.sh` first.
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout,
+                             QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fastsim  # noqa: E402
+from vhdl_image_tester.core.config import ABI_REG_VIDEO_TIMING, resolve_video_settings  # noqa: E402
+from vhdl_image_tester.core.image_converter import prepare_image, rgb_to_yuv10, yuv10_to_rgb  # noqa: E402
+
+CIRCLES = "Moving circles"
+
+
+class Circles:
+    """Bouncing, overlapping circles over a slow gradient."""
+
+    def __init__(self, w: int, h: int, n: int = 22, seed: int = 3):
+        rng = np.random.default_rng(seed)
+        self.w, self.h = w, h
+        self.r = rng.uniform(0.04, 0.14, n) * h
+        self.pos = np.stack([rng.uniform(0, w, n), rng.uniform(0, h, n)], 1)
+        self.vel = rng.normal(0, 1, (n, 2)) * h / 140
+        self.col = [tuple(int(c) for c in rng.integers(40, 256, 3)) for _ in range(n)]
+        self.t = 0
+
+    def frame(self) -> Image.Image:
+        self.t += 1
+        self.pos += self.vel
+        for k, lim in ((0, self.w), (1, self.h)):
+            lo, hi = self.pos[:, k] < 0, self.pos[:, k] > lim
+            self.vel[lo | hi, k] *= -1
+            self.pos[:, k] = np.clip(self.pos[:, k], 0, lim)
+        y = np.linspace(0, 1, self.h)[:, None]
+        x = np.linspace(0, 1, self.w)[None, :]
+        ph = self.t / 90
+        shape = (self.h, self.w)
+        bg = np.stack([np.broadcast_to(40 + 50 * np.sin(3 * y + ph), shape),
+                       np.broadcast_to(20 + 30 * np.cos(2 * x + ph), shape),
+                       90 + 60 * np.sin(2 * (x + y) - ph)], -1)
+        im = Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8))
+        d = ImageDraw.Draw(im)
+        lw = max(1, self.h // 120)
+        for (cx, cy), r, c in zip(self.pos, self.r, self.col):
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=c, outline=(0, 0, 0), width=lw)
+        return im
+
+
+class Live(QWidget):
+    def __init__(self, prog_dir: Path, decimation: int):
+        super().__init__()
+        self.prog_dir = prog_dir.resolve()
+        self.program = fastsim.load_program(self.prog_dir.name, self.prog_dir.parent)
+        self.vs = resolve_video_settings("1080p2997", decimation)
+        if self.vs.is_interlaced:
+            raise SystemExit("live preview supports progressive modes only")
+        self.w, self.h = self.vs.sim_width, self.vs.sim_height
+        exe = fastsim.build(self.prog_dir, self.vs.fpga_config)
+        self.proc = subprocess.Popen([str(exe), "--serve", str(self.w), str(self.h)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.circles = Circles(self.w, self.h)
+        self.still: Image.Image | None = None
+        self.values: dict[str, int] = {}
+        self.frames, self.t_last = 0, time.time()
+        self._build_ui()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(0)
+
+    # -- UI -----------------------------------------------------------------
+    def _build_ui(self):
+        self.setWindowTitle(f"fastsim live: {self.program.display_name}")
+        root = QHBoxLayout(self)
+
+        view = QVBoxLayout()
+        self.out_lbl = QLabel()
+        self.out_lbl.setFixedSize(960, 540)
+        self.out_lbl.setScaledContents(True)
+        self.in_lbl = QLabel()
+        self.in_lbl.setFixedSize(320, 180)
+        self.in_lbl.setScaledContents(True)
+        self.status = QLabel()
+        view.addWidget(self.out_lbl)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("input:"))
+        row.addWidget(self.in_lbl)
+        row.addWidget(self.status, 1)
+        view.addLayout(row)
+        root.addLayout(view)
+
+        ctl = QGridLayout()
+        r = 0
+        self.source = QComboBox()
+        self.source.addItem(CIRCLES)
+        for p in sorted((fastsim.ROOT / "test-images").glob("*.png")):
+            self.source.addItem(p.name, str(p))
+        self.source.addItem("Open image…")
+        self.source.currentIndexChanged.connect(self._source_changed)
+        ctl.addWidget(QLabel("Source"), r, 0)
+        ctl.addWidget(self.source, r, 1)
+        r += 1
+        self.play = QPushButton("Pause")
+        self.play.clicked.connect(self._toggle_play)
+        ctl.addWidget(self.play, r, 0, 1, 2)
+        r += 1
+
+        for p in self.program.parameters:
+            if p.is_toggle:
+                labels = p.value_labels or ["Off", "On"]
+                box = QCheckBox(f"{p.name_label}: {labels[0]} / {labels[1]}")
+                box.setChecked(p.initial_toggle_state)
+                box.toggled.connect(lambda on, pid=p.parameter_id: self._set(pid, int(on)))
+                self.values[p.parameter_id] = int(p.initial_toggle_state)
+                ctl.addWidget(box, r, 0, 1, 2)
+            else:
+                s = QSlider(Qt.Orientation.Horizontal)
+                s.setRange(0, 1023)
+                s.setValue(p.initial_pot_value)
+                s.valueChanged.connect(lambda v, pid=p.parameter_id: self._set(pid, v))
+                self.values[p.parameter_id] = p.initial_pot_value
+                ctl.addWidget(QLabel(p.name_label), r, 0)
+                ctl.addWidget(s, r, 1)
+            r += 1
+        ctl.setRowStretch(r, 1)
+        side = QWidget()
+        side.setLayout(ctl)
+        side.setFixedWidth(330)
+        root.addWidget(side)
+
+    def _set(self, pid, v):
+        self.values[pid] = v
+
+    def _toggle_play(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.play.setText("Play")
+        else:
+            self.timer.start(0)
+            self.play.setText("Pause")
+
+    def _source_changed(self, i):
+        text = self.source.itemText(i)
+        if text == CIRCLES:
+            self.still = None
+        elif text == "Open image…":
+            path, _ = QFileDialog.getOpenFileName(self, "Image", str(fastsim.ROOT),
+                                                  "Images (*.png *.jpg *.jpeg *.bmp *.tif)")
+            if path:
+                self.still = prepare_image(Image.open(path), self.w, self.h)
+        else:
+            self.still = prepare_image(Image.open(self.source.itemData(i)), self.w, self.h)
+
+    # -- simulation ---------------------------------------------------------
+    def tick(self):
+        src = self.still if self.still is not None else self.circles.frame()
+        regs = self.program.build_register_array(self.values)
+        regs[ABI_REG_VIDEO_TIMING] = self.vs.timing_id
+        self.proc.stdin.write((",".join(map(str, regs)) + "\n").encode())
+        self.proc.stdin.write(rgb_to_yuv10(src).astype("<u2").tobytes())
+        self.proc.stdin.flush()
+        n = self.w * self.h * 3 * 2
+        buf = self.proc.stdout.read(n)
+        if len(buf) != n:
+            self.timer.stop()
+            self.status.setText("simulator stopped")
+            return
+        out = yuv10_to_rgb(np.frombuffer(buf, "<u2").reshape(self.h, self.w, 3))
+        self.out_lbl.setPixmap(_pix(out))
+        self.in_lbl.setPixmap(_pix(src))
+        self.frames += 1
+        now = time.time()
+        if now - self.t_last >= 1:
+            self.status.setText(f"{self.frames / (now - self.t_last):.1f} fps  "
+                                f"{self.w}x{self.h} (÷{1920 // self.w})")
+            self.frames, self.t_last = 0, now
+
+    def closeEvent(self, e):
+        self.timer.stop()
+        self.proc.kill()
+        super().closeEvent(e)
+
+
+def _pix(im: Image.Image) -> QPixmap:
+    a = np.ascontiguousarray(np.asarray(im.convert("RGB")))
+    q = QImage(a.data, a.shape[1], a.shape[0], 3 * a.shape[1], QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(q.copy())
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("program_dir", type=Path)
+    ap.add_argument("--decimation", type=int, default=4, choices=[2, 4, 8])
+    a = ap.parse_args()
+    app = QApplication(sys.argv)
+    w = Live(a.program_dir, a.decimation)
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
