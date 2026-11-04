@@ -8,6 +8,8 @@
 Opens live.py windows with WA_DontShowOnScreen (real macOS fonts, nothing
 pops up), drives them frame by frame and grabs the window:
   app_kaleido.png / app_kaleido.gif   Kaleido radial mode, LFOs, moving clip
+  app_panel.png                       the virtual front panel tab
+  app_controls.png                    the Controls tab: TOML labels and LFOs
   app_feedback.png                    a community program via the picker
 Only the project's own test media is used as input.
 Run with the bundled Python: `source tools/env.sh` first.
@@ -21,7 +23,7 @@ from pathlib import Path
 from PIL import Image
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QTabWidget
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import live  # noqa: E402
@@ -112,6 +114,9 @@ def main():
             frames.append(grab(w))
     save_png(frames[-1], a.out / "app_kaleido.png")
     save_gif(frames, a.out / "app_kaleido.gif", 760, 100)
+    save_png(grab(w), a.out / "app_panel.png")
+    w.findChild(QTabWidget).setCurrentIndex(1)
+    save_png(grab(w), a.out / "app_controls.png")
     w.proc.kill()
     w.video.close()
 

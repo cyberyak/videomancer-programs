@@ -43,8 +43,8 @@ dry input. Full controls, install steps and limitations are in
 ## The live simulator
 
 `tools/fastsim/live.py` runs a program's actual VHDL, compiled with
-[Verilator](https://www.verilator.org), continuously at about **28 fps** (480×270 on an
-Apple M2). That's roughly 1,000× faster than the SDK's GHDL image tester, so you can play
+[Verilator](https://www.verilator.org), continuously at **15–45 fps** depending on the program
+(480×270 on an Apple M2: Kaleido about 17, passthru about 44). That's roughly 1,000× faster than the SDK's GHDL image tester, so you can play
 with a program the way you would on the device.
 
 ![Live simulator running a community program](docs/media/app_feedback.png)
@@ -69,6 +69,15 @@ Here czartroniks' Feedback runs on the moving-circles source.*
 - **Virtual front panel:** laid out like the Videomancer.
 - **MIDI:** learn mode for any controller, plus a Faderfox UC4 preset.
 - **Stable:** errors are logged to `build/live.log` instead of closing the window.
+
+![Virtual front panel in the live simulator](docs/media/app_panel.png)
+
+*The Panel tab: click and drag the knobs, switches and fader, or bind them to a MIDI controller
+with Learn. Its Time, Space and Slope mapping is this simulator's own, not LZX firmware.*
+
+![Controls tab with per-knob LFOs](docs/media/app_controls.png)
+
+*The Controls tab: every control is labelled from the program's TOML, with an LFO per knob.*
 
 It simulates what the FPGA does clock by clock, so output matches the hardware logic,
 not an approximation. Accuracy against LZX's GHDL reference is tracked in
