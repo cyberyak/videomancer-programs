@@ -43,8 +43,8 @@ dry input. Full controls, install steps and limitations are in
 ## The live simulator
 
 `tools/fastsim/live.py` runs a program's actual VHDL, compiled with
-[Verilator](https://www.verilator.org), continuously at **15–45 fps** depending on the program
-(480×270 on an Apple M2: Kaleido about 17, passthru about 44). That's roughly 1,000× faster than the SDK's GHDL image tester, so you can play
+[Verilator](https://www.verilator.org), continuously at about **28 fps** for Kaleido, and
+faster for simpler programs (480×270 on an Apple M2: passthru reaches about 70). That's roughly 1,000× faster than the SDK's GHDL image tester, so you can play
 with a program the way you would on the device.
 
 ![Live simulator running a community program](docs/media/app_feedback.png)
